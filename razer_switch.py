@@ -36,6 +36,18 @@ DEVICES = [
          10: ('Scroll Down', 'mouse:scrolldown'),
          0x60: ('DPI Button', 'dpi:cycleup'),
      }},
+    # tested on the wireless dongle (0x007D); OpenRazer lists 0x007C for the cable, not tested here
+    {'name': 'DeathAdder V2 Pro', 'pids': (0x007D,), 'txn': 0x1F, 'verified': True, 'drawing': 'generic',
+     'dpi_max': 20000,  # OpenRazer's DPI_MAX for this model
+     'buttons': {
+         1: ('Left Click', 'mouse:left'),
+         2: ('Right Click', 'mouse:right'),
+         3: ('Scroll Click', 'mouse:middle'),
+         5: ('Mouse Button 5', 'mouse:forward'),
+         4: ('Mouse Button 4', 'mouse:back'),
+         9: ('Scroll Up', 'mouse:scrollup'),
+         10: ('Scroll Down', 'mouse:scrolldown'),
+     }},
 ]
 # transaction IDs tried, read-only, on a mouse not in DEVICES (0x11 is what web Synapse sent the V4 Pro)
 TXN_GUESSES = (0x1F, 0x3F, 0xFF, 0x11)
@@ -141,9 +153,15 @@ def decode(kind, payload):
 
 # polling-rate codes, captured from web Synapse on the V4 Pro (set with 00/40, read with 00/C0)
 POLL_HZ = {0x40: 125, 0x10: 500, 0x08: 1000, 0x04: 2000, 0x02: 4000, 0x01: 8000}
+# older mice (DeathAdder V2 Pro) refuse 00/C0 and use 00/85 to read, 00/05 to set; codes as in OpenRazer, tested
+POLL_HZ_CLASSIC = {0x08: 125, 0x02: 500, 0x01: 1000}
 DPI_RANGE = (100, 50000)  # the range web Synapse offers for the V4 Pro
 # besides button sets (02/0C), the only writes allowed, and only on verified models
-SETTING_WRITES = {b'\x00\x40', b'\x04\x06'}
+SETTING_WRITES = {b'\x00\x40', b'\x00\x05', b'\x04\x06'}
+
+
+def dpi_range(model):
+    return DPI_RANGE[0], model.get('dpi_max', DPI_RANGE[1])
 
 
 def packet(cls, cmd, args, txn, size=0x0A):
@@ -194,6 +212,7 @@ def transact(dev, pkt):
 class Mouse:
     def __init__(self):
         self.dev, self.model, self.txn = None, None, None
+        self.poll_table = None  # POLL_HZ or POLL_HZ_CLASSIC, whichever this mouse answered to
         self.lock = threading.RLock()  # the app reads battery/DPI on a background thread while writes happen on the main one
 
     def connect(self):
@@ -210,7 +229,7 @@ class Mouse:
                 try:
                     d.open_path(info['path'])
                     if transact(d, read_packet(1, txn))[0] == 0x02:
-                        self.dev, self.model, self.txn = d, model, txn
+                        self.dev, self.model, self.txn, self.poll_table = d, model, txn, None
                         return
                 except OSError:
                     pass
@@ -275,26 +294,43 @@ class Mouse:
         stages = [(a[3 + 5 * i + 1] << 8 | a[3 + 5 * i + 2], a[3 + 5 * i + 3] << 8 | a[3 + 5 * i + 4]) for i in range(a[2])]
         return a[1], stages
 
-    def polling_code(self):
-        """Raw polling-rate code from 00/C0 (00/85 is rejected on the V4 Pro). A change shows up ~0.3 s after it is set."""
-        return self.read(0x00, 0xC0, [0x01])[1]
-
     def polling(self):
-        """Polling rate in Hz, or None for a code we haven't seen."""
-        return POLL_HZ.get(self.polling_code())
+        """Polling rate in Hz, or None for a code we haven't seen. A change shows up ~0.3 s after it is set.
+        Newer mice answer 00/C0 (the V4 Pro rejects 00/85); older ones reject 00/C0 and answer 00/85."""
+        if self.poll_table is not POLL_HZ_CLASSIC:
+            try:
+                code = self.read(0x00, 0xC0, [0x01])[1]
+                self.poll_table = POLL_HZ
+                return POLL_HZ.get(code)
+            except OSError as e:
+                if 'rejected' not in str(e):  # unplugged, not refused
+                    raise
+        code = self.read(0x00, 0x85)[0]
+        self.poll_table = POLL_HZ_CLASSIC
+        return POLL_HZ_CLASSIC.get(code)
+
+    def polling_rates(self):
+        """The rates this mouse can be set to (the newer set until the first polling read)."""
+        return sorted((self.poll_table or POLL_HZ).values())
 
     def set_polling(self, hz):
-        code = {v: k for k, v in POLL_HZ.items()}.get(hz)
-        if code is None:
-            raise ValueError(f'{hz} Hz is not one of {sorted(POLL_HZ.values())}')
         self.connect()
-        self.call(packet(0x00, 0x40, [0x01, code], self.txn, size=0x02))
+        if self.poll_table is None:
+            self.polling()
+        code = {v: k for k, v in self.poll_table.items()}.get(hz)
+        if code is None:
+            raise ValueError(f'{hz} Hz is not one of {self.polling_rates()}')
+        if self.poll_table is POLL_HZ:
+            self.call(packet(0x00, 0x40, [0x01, code], self.txn, size=0x02))
+        else:
+            self.call(packet(0x00, 0x05, [code], self.txn, size=0x01))
 
     def set_dpi(self, dpi):
         """One DPI for both axes, as web Synapse sends it with Sensitivity Stages off (04/06, one stage)."""
-        if not DPI_RANGE[0] <= int(dpi) <= DPI_RANGE[1]:
-            raise ValueError(f'DPI must be {DPI_RANGE[0]} to {DPI_RANGE[1]}')
         self.connect()
+        lo, hi = dpi_range(self.model)
+        if not lo <= int(dpi) <= hi:
+            raise ValueError(f'DPI must be {lo} to {hi}')
         if len(self.dpi_stages()[1]) != 1:
             raise ValueError('this mouse has several DPI stages set up; change them in Synapse for now')
         hi, lo = int(dpi) >> 8, int(dpi) & 0xFF
@@ -446,14 +482,15 @@ def probe(ids=range(1, 0x80)):
 
 class _FakeDev:
     """Stands in for the mouse in test(): records what was sent, answers 'ok'."""
-    def __init__(self):
-        self.sent = []
+    def __init__(self, refuse=()):
+        self.sent, self.refuse = [], set(refuse)  # refuse: (class, command) pairs answered with status 05
 
     def send_feature_report(self, data):
         self.sent.append(bytes(data[1:]))
 
     def get_feature_report(self, _id, _n):
-        return b'\x00\x02' + bytes(90)
+        refused = self.sent and (self.sent[-1][6], self.sent[-1][7]) in self.refuse
+        return (b'\x00\x05' if refused else b'\x00\x02') + bytes(90)
 
     def close(self):
         pass
@@ -509,7 +546,7 @@ def test():
     m.set_action(5, 'f7')
     assert m.dev.sent[-1] == bytes(cap)
     for bad in (lambda: m.set_action(1, 'f7'), lambda: m.set_action(6, 'f7'),
-                lambda: m.call(packet(0x00, 0x05, [], 0x1F)),  # any other write-type command
+                lambda: m.call(packet(0x0F, 0x02, [], 0x1F)),  # any other write-type command (this one is lighting)
                 lambda: m.call(set_packet(0x61, 'f7', 0x1F))):  # set packet for an ID not in the entry
         n = len(m.dev.sent)
         try:
@@ -526,6 +563,23 @@ def test():
     m.get_action(5)  # reads still work read-only
     assert all(p[7] & 0x80 for p in m.dev.sent[-1:])
     assert read_packet(0x60, 0x3F)[6:10].hex(' ') == '02 8c 01 60'
+
+    # polling: newer mice are set with 00/40; older ones refuse 00/C0 and are set with 00/05 (DeathAdder V2 Pro)
+    m.model, m.poll_table, m.dev = v4, None, _FakeDev()
+    m.set_polling(500)
+    assert m.dev.sent[-1][5:10].hex(' ') == '02 00 40 01 10' and m.polling_rates()[-1] == 8000
+    da = model_for(0x007D)
+    assert da['verified'] and set(da['buttons']) == {1, 2, 3, 4, 5, 9, 10}
+    m.model, m.poll_table, m.dev = da, None, _FakeDev(refuse={(0x00, 0xC0)})
+    m.set_polling(500)
+    assert m.poll_table is POLL_HZ_CLASSIC and m.polling_rates() == [125, 500, 1000]
+    assert m.dev.sent[-1][5:9].hex(' ') == '01 00 05 02'
+    try:
+        m.set_polling(8000)
+        raise AssertionError('8000 Hz allowed on an older mouse')
+    except ValueError:
+        pass
+    assert dpi_range(da) == (100, 20000) and dpi_range(v4) == DPI_RANGE
 
     # profiles move to %APPDATA%: copied once from the old folder, never overwritten afterwards
     import tempfile

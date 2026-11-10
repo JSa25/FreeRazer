@@ -171,14 +171,14 @@ def synapse_running():
     return sorted(n for n in names if any(h in n for h in SYNAPSE_HINTS))
 
 
-def slider_to_dpi(v):
+def slider_to_dpi(v, rng=rs.DPI_RANGE):
     """The DPI slider runs 0..1000 on a log scale, so 400-3200 (where most people sit) isn't squeezed into a sliver."""
-    lo, hi = rs.DPI_RANGE
+    lo, hi = rng
     return max(lo, min(hi, round(lo * (hi / lo) ** (v / 1000) / 50) * 50))
 
 
-def dpi_to_slider(dpi):
-    lo, hi = rs.DPI_RANGE
+def dpi_to_slider(dpi, rng=rs.DPI_RANGE):
+    lo, hi = rng
     return 1000 * math.log(max(lo, dpi) / lo) / math.log(hi / lo)
 
 
@@ -540,6 +540,7 @@ class App(tk.Tk):
         row = ttk.Frame(pg)
         row.pack(anchor='w')
         self.dpi_var = tk.StringVar()
+        self.dpi_rng = rs.DPI_RANGE  # the connected mouse's own range, set when it is read
         self.dpi_box = ttk.Spinbox(row, textvariable=self.dpi_var, from_=rs.DPI_RANGE[0], to=rs.DPI_RANGE[1],
                                    increment=50, width=8, command=self.dpi_changed)
         self.dpi_box.pack(side='left')
@@ -1258,13 +1259,18 @@ class App(tk.Tk):
         (level, charging), (x, y), hz, model = info
         self.dev_lbl.configure(text=f'Battery {level}%' + (' · charging' if charging else ''), style='HeadMuted.TLabel')
         verified = model['verified']
+        self.dpi_rng = rs.dpi_range(model)
+        self.dpi_box.configure(from_=self.dpi_rng[0], to=self.dpi_rng[1])
+        rates = self.mouse.polling_rates()  # older mice stop at 1000 Hz
+        for rb in self.poll_btns:
+            rb.grid() if int(rb.cget('value')) in rates else rb.grid_remove()
         for w in (self.dpi_box, *self.poll_btns):
             w.state(['!disabled'] if verified else ['disabled'])
         self.dpi_scale.configure(state='normal' if verified else 'disabled', bg=ACCENT if verified else DIM)
         self.perf_note.configure(text='' if verified else f'{model["name"]} is read-only until it is verified.')
         if self.focus_get() is not self.dpi_box:  # don't overwrite a number being typed
             self.dpi_var.set(str(x))
-            self.dpi_scale.set(dpi_to_slider(x))
+            self.dpi_scale.set(dpi_to_slider(x, self.dpi_rng))
         self.poll_var.set(hz or 0)
         self._shown = {'dpi': x, 'hz': hz}
         self.about_lbl.configure(text=f'{model["name"]}' + ('' if verified else ' (read-only, not verified yet)') +
@@ -1289,16 +1295,17 @@ class App(tk.Tk):
             return self.dpi_var.set(str(self._shown.get('dpi', '')))
         if dpi == self._shown.get('dpi'):
             return
-        if not rs.DPI_RANGE[0] <= dpi <= rs.DPI_RANGE[1]:
+        lo, hi = self.dpi_rng
+        if not lo <= dpi <= hi:
             self.dpi_var.set(str(self._shown.get('dpi', '')))
-            return self.set_status(f'DPI must be {rs.DPI_RANGE[0]} to {rs.DPI_RANGE[1]}.')
+            return self.set_status(f'DPI must be {lo} to {hi}.')
         self._shown['dpi'] = dpi
-        self.dpi_scale.set(dpi_to_slider(dpi))
+        self.dpi_scale.set(dpi_to_slider(dpi, self.dpi_rng))
         self._send(lambda: self.mouse.set_dpi(dpi), f'DPI set to {dpi}.')
 
     def dpi_sliding(self, value):
         """While the slider moves, only the number follows; the mouse is set when it is let go."""
-        self.dpi_var.set(str(slider_to_dpi(float(value))))
+        self.dpi_var.set(str(slider_to_dpi(float(value), self.dpi_rng)))
 
     def poll_changed(self):
         hz = self.poll_var.get()

@@ -309,7 +309,7 @@ Mice without their own drawing get a generic one (`'drawing': 'generic'`).
 
 ## Protocol notes
 
-Captured from Razer's web configurator via WebHID on the owner's own mouse. Feature report 0, 90 bytes: byte 0 status (02 ok, 01 busy), byte 1 transaction ID, byte 5 data size, bytes 6-7 command class and ID, arguments from byte 8, byte 88 the XOR of bytes 2-87. Set a button: class 02 ID 0C, arguments `[profile 01, button, hypershift 00, action type, payload length, payload]`; read: ID 8C. Action types: 01 mouse button, 02 key `[modifiers, HID usage]` (Ctrl 01, Shift 02, Alt 04), 06 DPI.
+Captured from Razer's web configurator via WebHID on the owner's own mouse. Feature report 0, 90 bytes: byte 0 status (02 ok, 01 busy), byte 1 transaction ID, byte 5 data size, bytes 6-7 command class and ID, arguments from byte 8, byte 88 the XOR of bytes 2-87. Set a button: class 02 ID 0C, arguments `[profile 01, button, hypershift 00, action type, payload length, payload]`; read: ID 8C. Action types: 01 mouse button, 02 key `[modifiers, HID usage]` (Ctrl 01, Shift 02, Alt 04), 06 DPI. Polling rate: newer mice read with 00/C0 and set with 00/40 (125 to 8000 Hz); older ones such as the DeathAdder V2 Pro refuse 00/C0 and use 00/85 and 00/05 (125, 500, 1000 Hz). The app tries the newer command first.
 
 ## Licence
 
