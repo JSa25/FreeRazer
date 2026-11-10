@@ -134,7 +134,7 @@ Names and USB product IDs from [OpenRazer](https://github.com/openrazer/openraze
 
 </details>
 
-Writes are refused for any mouse or button that is not in a verified entry of the device table (`DEVICES` in `razer_switch.py`). The app only reads and sets button bindings, DPI and polling rate; it never touches firmware or lighting.
+The app only reads and sets button bindings, DPI and polling rate; it never touches firmware or lighting.
 
 Want your mouse supported? See [Adding a mouse](#adding-a-mouse).
 
