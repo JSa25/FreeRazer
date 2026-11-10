@@ -164,6 +164,21 @@ SLEEP_MIN = (1, 15)
 LOW_POWER_MIN = 5
 
 
+def parse_stages(a):
+    """04/86 arguments -> (active stage from 1, [(x, y), ...])."""
+    count = min(a[2], 5)
+    return a[1], [(a[3 + 7 * i + 1] << 8 | a[3 + 7 * i + 2], a[3 + 7 * i + 3] << 8 | a[3 + 7 * i + 4]) for i in range(count)]
+
+
+def stages_packet(active, stages, txn):
+    """04/06 as OpenRazer builds it: storage 01, active stage, count, then per stage its number from 0,
+    x hi/lo, y hi/lo and 2 reserved bytes."""
+    args = [0x01, active, len(stages)]
+    for i, (x, y) in enumerate(stages):
+        args += [i, x >> 8, x & 0xFF, y >> 8, y & 0xFF, 0, 0]
+    return packet(0x04, 0x06, args, txn, size=0x26)
+
+
 def dpi_range(model):
     return DPI_RANGE[0], model.get('dpi_max', DPI_RANGE[1])
 
@@ -342,11 +357,10 @@ class Mouse:
         return a[1] << 8 | a[2], a[3] << 8 | a[4]
 
     def dpi_stages(self):
-        """(active stage number, [(x, y), ...]). 04/86 answers storage, active, count, then 5 bytes per stage."""
+        """(active stage number from 1, [(x, y), ...]). 04/86 answers storage, active, count, then 7 bytes per
+        stage: stage number, x hi/lo, y hi/lo, 2 reserved (read on the V4 Pro with five stages set by Synapse)."""
         self.connect()
-        a = self.call(packet(0x04, 0x86, [0x01], self.txn))[8:8 + 3 + 5 * 5]  # room for up to 5 stages
-        stages = [(a[3 + 5 * i + 1] << 8 | a[3 + 5 * i + 2], a[3 + 5 * i + 3] << 8 | a[3 + 5 * i + 4]) for i in range(a[2])]
-        return a[1], stages
+        return parse_stages(self.call(packet(0x04, 0x86, [0x01], self.txn, size=0x26))[8:8 + 0x26])
 
     def polling(self):
         """Polling rate in Hz, or None for a code we haven't seen. A change shows up ~0.3 s after it is set.
@@ -380,15 +394,17 @@ class Mouse:
             self.call(packet(0x00, 0x05, [code], self.txn, size=0x01))
 
     def set_dpi(self, dpi):
-        """One DPI for both axes, as web Synapse sends it with Sensitivity Stages off (04/06, one stage)."""
+        """One DPI for both axes. With one stage this is what web Synapse sends; with several (the DPI button
+        cycles through them) only the active stage changes and the others stay as they are."""
         self.connect()
         lo, hi = dpi_range(self.model)
         if not lo <= int(dpi) <= hi:
             raise ValueError(f'DPI must be {lo} to {hi}')
-        if len(self.dpi_stages()[1]) != 1:
-            raise ValueError('this mouse has several DPI stages set up; change them in Synapse for now')
-        hi, lo = int(dpi) >> 8, int(dpi) & 0xFF
-        self.call(packet(0x04, 0x06, [0x01, 0x01, 0x01, 0x00, hi, lo, hi, lo], self.txn))
+        active, stages = self.dpi_stages()
+        if not 1 <= active <= len(stages):  # unreadable table: fall back to a single stage
+            active, stages = 1, [(0, 0)]
+        stages[active - 1] = (int(dpi), int(dpi))
+        self.call(stages_packet(active, stages, self.txn))
 
 
 def describe(binding, model=DEVICES[0]):
@@ -640,6 +656,14 @@ def test():
     except ValueError:
         pass
     assert dpi_range(da) == (100, 20000) and dpi_range(v4) == DPI_RANGE
+
+    # DPI stages, as read from the V4 Pro after Synapse set five (active: the third)
+    five = bytes.fromhex('01 03 05 01 01 90 01 90 00 00 02 03 20 03 20 00 00 03 06 40 06 40 00 00 '
+                         '04 0c 80 0c 80 00 00 05 19 00 19 00 00 00')
+    assert parse_stages(five) == (3, [(400, 400), (800, 800), (1600, 1600), (3200, 3200), (6400, 6400)])
+    p = stages_packet(3, [(400, 400), (800, 800), (1000, 1000)], 0x1F)
+    assert p[5:8].hex(' ') == '26 04 06' and p[8:11].hex(' ') == '01 03 03' and p[25:32].hex(' ') == '02 03 e8 03 e8 00 00'
+    assert stages_packet(1, [(900, 900)], 0x1F)[8:16].hex(' ') == '01 01 01 00 03 84 03 84'  # same args as web Synapse
 
     # answers to another program's command (Synapse's lighting frames) are skipped and the command resent
     m.model, m.dev = v4, _FakeDev()

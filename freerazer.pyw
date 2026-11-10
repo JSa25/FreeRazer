@@ -1287,8 +1287,6 @@ class App(tk.Tk):
     def apply(self):
         if self.put_on_mouse(self.current) and self.current not in self.cfg['links'].values():
             self.base = self.current  # what auto-switch returns to after a game
-        if self._synapse:
-            self.set_status(f'Applied "{self.shown(self.current)}", but Razer Synapse is running and may change it back.')
 
     def put_on_mouse(self, name, why=''):
         binding = self.resolved(name)
@@ -1345,8 +1343,7 @@ class App(tk.Tk):
             event = globals().get('SHOW_EVENT')
             if event and ctypes.windll.kernel32.WaitForSingleObject(event, 0) == 0:  # app was launched again
                 self.show_window()
-            # paused while Synapse runs: two programs switching the same mouse would fight
-            exe = rs.foreground_exe() if self.cfg.get('auto') and not self._synapse else None
+            exe = rs.foreground_exe() if self.cfg.get('auto') else None
             # ignore this window (and file pickers it opens) so editing doesn't switch profiles
             if exe and exe not in ('freerazer.exe', 'python.exe', 'pythonw.exe'):
                 want = self.cfg['links'].get(exe, self.base)
@@ -1391,25 +1388,59 @@ class App(tk.Tk):
                 synapse = []
             self._q.put(lambda: self._synapse_done(synapse))
             try:
-                info = (self.mouse.battery(), self.mouse.dpi(), self.mouse.polling(), self.mouse.model, self.mouse.power())
+                read = lambda: (self.mouse.battery(), self.mouse.dpi(), self.mouse.polling(), self.mouse.model,
+                                self.mouse.power())
+                info = read()
+                fixed = self.keep_settings(info) if synapse else []
+                if fixed:  # Synapse's window pushes its own profile when it shows a mouse
+                    time.sleep(0.4)
+                    info = read()
+                    msg = f'Razer Synapse changed the {", ".join(fixed)}. FreeRazer put your settings back.'
+                    self._q.put(lambda: self.set_status(msg))
             except (OSError, ValueError):
                 info = None
             self._q.put(lambda: self._device_done(info))
         threading.Thread(target=work, daemon=True).start()
         self.after(30000, self.refresh_device)
 
+    def keep_settings(self, info):
+        """Runs on the background thread while Synapse is open. Tested with Synapse 4: it leaves the mouse alone
+        in the background, but showing a mouse in its window writes Synapse's profile onto it. Whatever differs
+        from the profile and settings chosen here is written back. Returns what was put back."""
+        if not self.mouse.model['verified']:
+            return []
+        fixed = []
+        want = self.resolved(self.cfg.get('active', 'default'))
+        if any(self.mouse.get_action(b) != a for b, a in want.items()):
+            self.mouse.write(want)
+            fixed.append('buttons')
+        (_, _), (x, _), hz, _, power = info
+        keep = self.cfg.get('keep', {}).get(self.mouse.model['name'], {})
+        for key, now, label, write in (('dpi', x, 'DPI', self.mouse.set_dpi), ('hz', hz, 'polling rate', self.mouse.set_polling),
+                                       ('sleep', power and power[0], 'sleep time', self.mouse.set_sleep),
+                                       ('low', power and power[1], 'low power level', self.mouse.set_low_power)):
+            if key in keep and now is not None and now != keep[key]:
+                write(keep[key])
+                fixed.append(label)
+        return fixed
+
+    def remember(self, key, value):
+        """What you set here for this mouse, so it can be put back if Synapse changes it."""
+        self.cfg.setdefault('keep', {}).setdefault(self.model['name'], {})[key] = value
+        self.write_cfg()
+
     def _synapse_done(self, names):
         was, self._synapse = self._synapse, names
         if names:
-            self.warn_lbl.configure(text='Razer Synapse is running · auto-switch paused')
+            self.warn_lbl.configure(text='Razer Synapse is running')
             self.warn_lbl.pack(side='right', padx=(0, 20), before=self.dev_lbl)
             if not was:
-                self.set_status('Razer Synapse is running and can undo changes made here. Quit Synapse '
-                                '(its tray icon > Exit) for FreeRazer to work reliably.')
+                self.set_status('Razer Synapse is running. If it changes this mouse (it does when you open the mouse '
+                                'in its window), FreeRazer puts your settings back within 30 seconds.')
         else:
             self.warn_lbl.pack_forget()
             if was:
-                self.set_status('Razer Synapse has closed. Auto-switch is running again.')
+                self.set_status('Razer Synapse has closed.')
 
     def _device_done(self, info):
         if not self.winfo_exists():
@@ -1479,6 +1510,7 @@ class App(tk.Tk):
             return self.set_status(f'DPI must be {lo} to {hi}.')
         self._shown['dpi'] = dpi
         self.dpi_scale.set(dpi_to_slider(dpi, self.dpi_rng))
+        self.remember('dpi', dpi)
         self._send(lambda: self.mouse.set_dpi(dpi), f'DPI set to {dpi}.')
 
     def power_sliding(self, key, value):
@@ -1490,6 +1522,7 @@ class App(tk.Tk):
         if not self.power[key][0].on or v == self._shown.get(key):
             return
         self._shown[key] = v
+        self.remember(key, v)
         if key == 'sleep':
             self._send(lambda: self.mouse.set_sleep(v), f'The mouse now sleeps after {v} min idle.')
         else:
@@ -1503,6 +1536,7 @@ class App(tk.Tk):
         hz = self.poll_var.get()
         if hz != self._shown.get('hz'):
             self._shown['hz'] = hz
+            self.remember('hz', hz)
             self._send(lambda: self.mouse.set_polling(hz), f'Polling rate set to {hz} Hz.')
 
     def _send(self, write, done):

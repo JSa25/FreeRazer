@@ -231,7 +231,7 @@ Want your mouse supported? See [Adding a mouse](#adding-a-mouse).
 - Lives in the system tray; can start with Windows.
 - Profiles are stored in `%APPDATA%\FreeRazer\profiles.json`. A `profiles.json` from an older version next to the app is copied there on first start (the old file is left as a backup).
 
-Close Razer Synapse while using this; both talk to the mouse.
+Works alongside Razer Synapse (tested with Synapse 4), for example if you keep Synapse for a Razer keyboard. Synapse leaves the mouse alone in the background, but opening the mouse in Synapse's window writes Synapse's own settings to it; FreeRazer notices within 30 seconds and puts yours back.
 
 ## Running from source
 
