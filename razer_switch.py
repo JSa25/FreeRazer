@@ -216,14 +216,27 @@ def resolve(default, own=None, model=DEVICES[0]):
     return out
 
 
-def transact(dev, pkt):
-    dev.send_feature_report(b'\x00' + bytes(pkt))
-    for _ in range(20):
-        time.sleep(0.02)
-        r = bytes(dev.get_feature_report(0, 91))[1:]  # drop report ID
-        if r[0] != 0x01:  # 01 = busy, 02 = ok
-            return r
-    return r
+def transact(dev, pkt, tries=25):
+    """Send a command and return the mouse's answer to it. Razer Synapse streams lighting frames (0F/03) to
+    RGB mice over the same report, so an answer can belong to Synapse's command instead (seen on the
+    DeathAdder V2 Pro, about 2 in 3 reads). Those are thrown away and the command is sent again; every
+    command FreeRazer sends reads or sets a fixed value, so sending it twice is harmless."""
+    timed_out = None
+    for _ in range(tries):
+        dev.send_feature_report(b'\x00' + bytes(pkt))
+        for _ in range(20):
+            time.sleep(0.02)
+            r = bytes(dev.get_feature_report(0, 91))[1:]  # drop report ID
+            if r[0] != 0x01:  # 01 = busy, 02 = ok
+                break
+        if r[6:8] == bytes(pkt[6:8]):  # the answer echoes our command class and id
+            if r[0] != 0x04:
+                return r
+            # 04 = no answer from the mouse in time: asleep, or the wireless link busy with Synapse's frames
+            timed_out = r
+    if timed_out:
+        return timed_out
+    raise OSError('another program (Razer Synapse?) kept talking to the mouse; try again')
 
 
 class Mouse:
@@ -525,13 +538,19 @@ class _FakeDev:
     """Stands in for the mouse in test(): records what was sent, answers 'ok'."""
     def __init__(self, refuse=()):
         self.sent, self.refuse = [], set(refuse)  # refuse: (class, command) pairs answered with status 05
+        self.stray = 0  # how many of the next answers belong to another program's command
 
     def send_feature_report(self, data):
         self.sent.append(bytes(data[1:]))
 
     def get_feature_report(self, _id, _n):
-        refused = self.sent and (self.sent[-1][6], self.sent[-1][7]) in self.refuse
-        return (b'\x00\x05' if refused else b'\x00\x02') + bytes(90)
+        last = self.sent[-1] if self.sent else bytes(90)
+        if self.stray:  # an answer to someone else's command, like Synapse's lighting frames
+            self.stray -= 1
+            return b'\x00\x02' + bytes(4) + b'\x08\x0f\x03' + bytes(82)
+        refused = (last[6], last[7]) in self.refuse
+        # status, then the command header echoed back (as the mouse does), arguments zero
+        return b'\x00' + (b'\x05' if refused else b'\x02') + last[1:8] + bytes(82)
 
     def close(self):
         pass
@@ -621,6 +640,17 @@ def test():
     except ValueError:
         pass
     assert dpi_range(da) == (100, 20000) and dpi_range(v4) == DPI_RANGE
+
+    # answers to another program's command (Synapse's lighting frames) are skipped and the command resent
+    m.model, m.dev = v4, _FakeDev()
+    m.dev.stray = 3
+    assert m.get_action(4) is not None and len(m.dev.sent) == 4
+    m.dev.stray = 100
+    try:
+        m.get_action(4)
+        raise AssertionError('a stray answer was taken as the mouse answer')
+    except OSError:
+        pass
 
     # power saving, values as read from the V4 Pro (5 min, 30%) and DeathAdder (5%)
     assert percent_to_byte(30) == 77 and byte_to_percent(77) == 30 and percent_to_byte(5) == 13 and byte_to_percent(13) == 5

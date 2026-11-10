@@ -6,3 +6,6 @@ dist/
 *.tmp
 # personal profiles (the app keeps them in %APPDATA%\MouseProfiles)
 profiles.json
+
+synapse_test/*.json
+synapse_test/*.log
