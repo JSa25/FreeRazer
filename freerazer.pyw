@@ -572,6 +572,24 @@ class App(tk.Tk):
                                  width=9, command=self.poll_changed)
             rb.grid(row=0, column=i, padx=(0 if i == 0 else 2, 0))
             self.poll_btns.append(rb)
+        ttk.Label(pg, text='Power saving', style='H2.TLabel').pack(anchor='w', pady=(32, 0))
+        ttk.Label(pg, text='Makes the battery last longer when the mouse is wireless.',
+                  style='Muted.TLabel').pack(anchor='w', pady=(2, 8))
+        self.power = {}  # 'sleep' / 'low': (slider, value label, unit)
+        for key, text, lo, hi, unit in (('sleep', 'Sleep after being idle for', *rs.SLEEP_MIN, 'min'),
+                                         ('low', 'Low power mode when battery is below', rs.LOW_POWER_MIN, 25, '%')):
+            row = ttk.Frame(pg)
+            row.pack(anchor='w', pady=(6, 0))
+            ttk.Label(row, text=text, width=34).pack(side='left')
+            sc = tk.Scale(row, from_=lo, to=hi, orient='horizontal', length=round(260 * k), showvalue=0,
+                          bd=0, highlightthickness=0, troughcolor=PANEL, bg=ACCENT, activebackground='#5fe84a',
+                          sliderrelief='flat', sliderlength=round(16 * k), width=round(10 * k),
+                          command=lambda v, key=key: self.power_sliding(key, v))
+            sc.pack(side='left')
+            sc.bind('<ButtonRelease-1>', lambda e, key=key: self.power_changed(key))
+            val = ttk.Label(row, width=8, style='Muted.TLabel')
+            val.pack(side='left', padx=(12, 0))
+            self.power[key] = (sc, val, unit)
         self.perf_note = ttk.Label(pg, style='Muted.TLabel')
         self.perf_note.pack(anchor='w', pady=(24, 0))
 
@@ -1232,7 +1250,7 @@ class App(tk.Tk):
                 synapse = []
             self._q.put(lambda: self._synapse_done(synapse))
             try:
-                info = (self.mouse.battery(), self.mouse.dpi(), self.mouse.polling(), self.mouse.model)
+                info = (self.mouse.battery(), self.mouse.dpi(), self.mouse.polling(), self.mouse.model, self.mouse.power())
             except (OSError, ValueError):
                 info = None
             self._q.put(lambda: self._device_done(info))
@@ -1260,12 +1278,14 @@ class App(tk.Tk):
             for w in (self.dpi_box, *self.poll_btns):
                 w.state(['disabled'])
             self.dpi_scale.configure(state='disabled', bg=DIM)
+            for sc, _, _ in self.power.values():
+                sc.configure(state='disabled', bg=DIM)
             self.perf_note.configure(text='Connect the mouse (plug it in or switch it on) to change these.')
             if self._connected:
                 self.set_status('Mouse disconnected. Profiles still save; they go on the mouse when it is back.')
             self._connected = False
             return
-        (level, charging), (x, y), hz, model = info
+        (level, charging), (x, y), hz, model, power = info
         self.dev_lbl.configure(text=f'Battery {level}%' + (' · charging' if charging else ''), style='HeadMuted.TLabel')
         verified = model['verified']
         self.dpi_rng = rs.dpi_range(model)
@@ -1282,6 +1302,14 @@ class App(tk.Tk):
             self.dpi_scale.set(dpi_to_slider(x, self.dpi_rng))
         self.poll_var.set(hz or 0)
         self._shown = {'dpi': x, 'hz': hz}
+        self.power['low'][0].configure(to=rs.low_power_range(model)[1])
+        for (key, (sc, _, _)), value in zip(self.power.items(), power or (None, None)):
+            usable = verified and power is not None  # a mouse that refuses these has no power settings to change
+            sc.configure(state='normal' if usable else 'disabled', bg=ACCENT if usable else DIM)
+            if value is not None:
+                sc.set(value)
+                self.power_sliding(key, value)
+                self._shown[key] = value
         self.about_lbl.configure(text=f'{model["name"]}' + ('' if verified else ' (read-only, not verified yet)') +
                                  f'. Profiles are saved in {os.path.dirname(CFG)}.')
         if self.tray:
@@ -1312,6 +1340,20 @@ class App(tk.Tk):
         self.dpi_scale.set(dpi_to_slider(dpi, self.dpi_rng))
         self._send(lambda: self.mouse.set_dpi(dpi), f'DPI set to {dpi}.')
 
+    def power_sliding(self, key, value):
+        sc, val, unit = self.power[key]
+        val.configure(text=f'{int(float(value))} {unit}' if unit == 'min' else f'{int(float(value))}%')
+
+    def power_changed(self, key):
+        v = int(self.power[key][0].get())
+        if str(self.power[key][0].cget('state')) == 'disabled' or v == self._shown.get(key):
+            return
+        self._shown[key] = v
+        if key == 'sleep':
+            self._send(lambda: self.mouse.set_sleep(v), f'The mouse now sleeps after {v} min idle.')
+        else:
+            self._send(lambda: self.mouse.set_low_power(v), f'Low power mode now starts below {v}% battery.')
+
     def dpi_sliding(self, value):
         """While the slider moves, only the number follows; the mouse is set when it is let go."""
         self.dpi_var.set(str(slider_to_dpi(float(value), self.dpi_rng)))
@@ -1331,7 +1373,7 @@ class App(tk.Tk):
             try:
                 write()
                 time.sleep(0.4)  # polling-rate changes take ~0.3 s to show up
-                info = (self.mouse.battery(), self.mouse.dpi(), self.mouse.polling(), self.mouse.model)
+                info = (self.mouse.battery(), self.mouse.dpi(), self.mouse.polling(), self.mouse.model, self.mouse.power())
                 self._q.put(lambda: (self._device_done(info), self.set_status(done)))
             except (OSError, ValueError) as e:
                 msg = f'Could not change it: {e}'; self._q.put(lambda: self.set_status(msg))

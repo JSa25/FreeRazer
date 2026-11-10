@@ -25,7 +25,7 @@ PROFILE = 0x01  # the only profile slot web Synapse wrote to
 # on the V4 Pro, IDs outside these answer with leftover memory, so a wrong ID could write into it.
 DEVICES = [
     {'name': 'Viper V4 Pro', 'pids': (0x00E6,),  # dongle and cable report the same PID
-     'txn': 0x1F, 'verified': True, 'drawing': 'viper-v4-pro',
+     'txn': 0x1F, 'verified': True, 'drawing': 'viper-v4-pro', 'low_power_max': 100,
      'buttons': {  # id: (label as Synapse names it, factory action)
          1: ('Left Click', 'mouse:left'),
          2: ('Right Click', 'mouse:right'),
@@ -157,11 +157,28 @@ POLL_HZ = {0x40: 125, 0x10: 500, 0x08: 1000, 0x04: 2000, 0x02: 4000, 0x01: 8000}
 POLL_HZ_CLASSIC = {0x08: 125, 0x02: 500, 0x01: 1000}
 DPI_RANGE = (100, 50000)  # the range web Synapse offers for the V4 Pro
 # besides button sets (02/0C), the only writes allowed, and only on verified models
-SETTING_WRITES = {b'\x00\x40', b'\x00\x05', b'\x04\x06'}
+SETTING_WRITES = {b'\x00\x40', b'\x00\x05', b'\x04\x06', b'\x07\x03', b'\x07\x01'}
+# sleep when idle: 07/83 read, 07/03 set, seconds as 2 bytes (OpenRazer: 60-900; Synapse: 1-15 min)
+SLEEP_MIN = (1, 15)
+# low power mode: 07/81 read, 07/01 set, one byte out of 255 (the V4 Pro read 77 where Synapse showed 30%)
+LOW_POWER_MIN = 5
 
 
 def dpi_range(model):
     return DPI_RANGE[0], model.get('dpi_max', DPI_RANGE[1])
+
+
+def low_power_range(model):
+    # web Synapse offers up to 100% on the V4 Pro; OpenRazer caps other mice at 25%
+    return LOW_POWER_MIN, model.get('low_power_max', 25)
+
+
+def percent_to_byte(p):
+    return int(p * 255 / 100 + 0.5)
+
+
+def byte_to_percent(b):
+    return round(b * 100 / 255)
 
 
 def packet(cls, cmd, args, txn, size=0x0A):
@@ -281,6 +298,30 @@ class Mouse:
         """(percent, charging). Read on the V4 Pro: 07/80 byte 1 is the level out of 255, 07/84 byte 1 is charging."""
         level = self.read(0x07, 0x80)[1]
         return round(level * 100 / 255), bool(self.read(0x07, 0x84)[1])
+
+    def power(self):
+        """(sleep after idle in minutes, low power mode below this battery %), or None if the mouse refuses."""
+        try:
+            a, b = self.read(0x07, 0x83), self.read(0x07, 0x81)
+        except OSError as e:
+            if 'rejected' not in str(e):
+                raise
+            return None
+        return round((a[0] << 8 | a[1]) / 60), byte_to_percent(b[0])
+
+    def set_sleep(self, minutes):
+        if not SLEEP_MIN[0] <= int(minutes) <= SLEEP_MIN[1]:
+            raise ValueError(f'sleep time must be {SLEEP_MIN[0]} to {SLEEP_MIN[1]} minutes')
+        s = int(minutes) * 60
+        self.connect()
+        self.call(packet(0x07, 0x03, [s >> 8, s & 0xFF], self.txn, size=0x02))
+
+    def set_low_power(self, percent):
+        self.connect()
+        lo, hi = low_power_range(self.model)
+        if not lo <= int(percent) <= hi:
+            raise ValueError(f'low power level must be {lo} to {hi}%')
+        self.call(packet(0x07, 0x01, [percent_to_byte(int(percent))], self.txn, size=0x01))
 
     def dpi(self):
         """Current (x, y) DPI. Read on the V4 Pro: 04/85 with storage 01 answers 01, x hi/lo, y hi/lo."""
@@ -580,6 +621,21 @@ def test():
     except ValueError:
         pass
     assert dpi_range(da) == (100, 20000) and dpi_range(v4) == DPI_RANGE
+
+    # power saving, values as read from the V4 Pro (5 min, 30%) and DeathAdder (5%)
+    assert percent_to_byte(30) == 77 and byte_to_percent(77) == 30 and percent_to_byte(5) == 13 and byte_to_percent(13) == 5
+    assert low_power_range(v4) == (5, 100) and low_power_range(da) == (5, 25)
+    m.model, m.dev = da, _FakeDev()
+    m.set_sleep(10)
+    assert m.dev.sent[-1][5:10].hex(' ') == '02 07 03 02 58'
+    m.set_low_power(20)
+    assert m.dev.sent[-1][5:9].hex(' ') == '01 07 01 33'
+    for bad in (lambda: m.set_sleep(16), lambda: m.set_low_power(30)):
+        try:
+            bad()
+            raise AssertionError('out-of-range power setting allowed')
+        except ValueError:
+            pass
 
     # profiles move to %APPDATA%: copied once from the old folder, never overwritten afterwards
     import tempfile

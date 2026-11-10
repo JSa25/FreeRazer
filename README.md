@@ -219,7 +219,7 @@ Names and USB product IDs from [OpenRazer](https://github.com/openrazer/openraze
 
 </details>
 
-The app only reads and sets button bindings, DPI and polling rate; it never touches firmware or lighting.
+The app only reads and sets button bindings, DPI, polling rate and power saving (sleep timer, low power level); it never touches firmware or lighting.
 
 Want your mouse supported? See [Adding a mouse](#adding-a-mouse).
 
