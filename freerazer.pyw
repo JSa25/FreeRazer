@@ -61,8 +61,10 @@ VK_KEYS = {0x08: 'backspace', 0x09: 'tab', 0x0D: 'enter', 0x14: 'capslock', 0x1B
 
 # button: (label side, label y, line end x relative to centre, line end y) on a 720x340 drawing
 W, H, CX = 720, 340, 360
-LABELS = {1: ('l', 50, -35, 70), 3: ('l', 95, -8, 65), 5: ('l', 136, -77, 136), 4: ('l', 184, -79, 184),
-          9: ('r', 40, 5, 41), 2: ('r', 80, 35, 80), 10: ('r', 120, 4, 87), 0x60: ('r', 230, 9, 230)}
+# button: (side, label row y, target x from centre, target y). Rows are evenly spaced and ordered like the
+# targets, so each leader (straight out, then one bend into its button) never crosses another.
+LABELS = {1: ('l', 45, -35, 55), 3: ('l', 100, -8, 65), 5: ('l', 155, -74, 136), 4: ('l', 210, -76, 184),
+          2: ('r', 45, 35, 55), 9: ('r', 100, 4, 42), 10: ('r', 155, 3, 87), 0x60: ('r', 210, 9, 230)}
 
 
 APP_VERSION = '1.0.0'  # build.ps1 reads this; bump it for every release
@@ -294,6 +296,10 @@ class App(tk.Tk):
             self.after(3000, lambda: self.tray.notify(f'Updated to version {APP_VERSION}.', 'FreeRazer'))
 
     # ---------- data ----------
+    def shown(self, name):
+        """How a profile name is displayed; the built-in one is stored as 'default'."""
+        return 'Default' if name == 'default' else name
+
     def names(self):
         return ['default', *self.cfg['profiles']]
 
@@ -339,7 +345,7 @@ class App(tk.Tk):
         img = Image.open(os.path.join(getattr(sys, '_MEIPASS', HERE), 'icon.ico'))
         later = lambda f, *a: (lambda: self.after(0, f, *a))  # tray runs on its own thread; hand work to Tk
         profiles = pystray.Menu(lambda: [
-            pystray.MenuItem(n, later(self.apply_from_tray, n), radio=True,
+            pystray.MenuItem(self.shown(n), later(self.apply_from_tray, n), radio=True,
                              checked=lambda item, n=n: self.cfg.get('active') == n)
             for n in self.names()])
         self.tray = pystray.Icon('FreeRazer', img, 'FreeRazer', pystray.Menu(
@@ -843,7 +849,9 @@ class App(tk.Tk):
             s = -1 if side == 'l' else 1
             x_text, x_dot = cx + s * (reach + 53), cx + s * reach
             tx, ty = targets[b]
-            lines = (c.create_line(cx + s * (reach + 45), y, x_dot, y, fill=LEADER), c.create_line(x_dot, y, tx, ty, fill=LEADER))
+            x_bend = cx + s * (reach - 35)  # just outside the shell, so the slanted part only runs over the mouse
+            lines = (c.create_line(cx + s * (reach + 45), y, x_dot, y, fill=LEADER),
+                     c.create_line(x_dot, y, x_bend, y, tx, ty, fill=LEADER))
             dot = c.create_oval(x_dot - 2, y - 2, x_dot + 2, y + 2, fill=LEADER, outline=LEADER)
             text = c.create_text(x_text, y, anchor='e' if side == 'l' else 'w', font=FONT, tags=(f'b{b}',))
             self.labels[b] = (text, dot, lines)
@@ -871,8 +879,8 @@ class App(tk.Tk):
     # ---------- showing ----------
     def refresh_list(self):
         """Header: the profile you're looking at, and whether it is the one on the mouse."""
-        self.profile_box['values'] = self.names()
-        self.profile_box.set(self.current)
+        self.profile_box['values'] = [self.shown(n) for n in self.names()]
+        self.profile_box.set(self.shown(self.current))
         on = self.current == self.cfg.get('active')
         self.state_lbl.configure(text='On the mouse' if on else 'Not on the mouse',
                                  style='HeadOn.TLabel' if on else 'HeadMuted.TLabel')
@@ -979,7 +987,7 @@ class App(tk.Tk):
         self.edit = {}  # a profile stores only its changes from factory
         self.save()
         self.redraw()
-        self.set_status(f'All buttons in "{self.current}" are back to factory.')
+        self.set_status(f'All buttons in "{self.shown(self.current)}" are back to factory.')
 
     def toggle_record(self):
         if self.recording:
@@ -1026,6 +1034,7 @@ class App(tk.Tk):
     # ---------- profiles ----------
     def on_pick_profile(self, _):
         name = self.profile_box.get()
+        name = 'default' if name == 'Default' else name  # no other profile may be called that
         if name in self.names() and name != self.current:
             self.load_profile(name)
             self.refresh_list()
@@ -1076,7 +1085,7 @@ class App(tk.Tk):
             self.set_status('Pick a name other than "default".')
             return False
         if name in self.cfg['profiles']:
-            self.set_status(f'A profile called "{name}" already exists.')
+            self.set_status(f'A profile called "{self.shown(name)}" already exists.')
             return False
         # rebuild to keep list order
         self.cfg['profiles'] = {(name if k == old else k): v for k, v in self.cfg['profiles'].items()}
@@ -1088,7 +1097,7 @@ class App(tk.Tk):
         self.current = name
         self.write_cfg()
         self.refresh_list()
-        self.set_status(f'Renamed to "{name}".')
+        self.set_status(f'Renamed to "{self.shown(name)}".')
         return True
 
     def new(self):
@@ -1103,7 +1112,7 @@ class App(tk.Tk):
 
     def delete(self):
         name = self.current
-        if name == 'default' or not messagebox.askyesno('FreeRazer', f'Delete profile "{name}"?'):
+        if name == 'default' or not messagebox.askyesno('FreeRazer', f'Delete profile "{self.shown(name)}"?'):
             return
         del self.cfg['profiles'][name]
         if self.cfg.get('active') == name:
@@ -1114,13 +1123,13 @@ class App(tk.Tk):
         self.write_cfg()
         self.load_profile('default')
         self.refresh_list()
-        self.set_status(f'Deleted "{name}".')
+        self.set_status(f'Deleted "{self.shown(name)}".')
 
     def apply(self):
         if self.put_on_mouse(self.current) and self.current not in self.cfg['links'].values():
             self.base = self.current  # what auto-switch returns to after a game
         if self._synapse:
-            self.set_status(f'Applied "{self.current}", but Razer Synapse is running and may change it back.')
+            self.set_status(f'Applied "{self.shown(self.current)}", but Razer Synapse is running and may change it back.')
 
     def put_on_mouse(self, name, why=''):
         binding = self.resolved(name)
@@ -1132,7 +1141,7 @@ class App(tk.Tk):
         self.cfg['active'] = name
         self.write_cfg()
         self.refresh_list()
-        self.set_status(f'Mouse is on "{name}"{why}: {rs.describe(binding, self.model)}')
+        self.set_status(f'Mouse is on "{self.shown(name)}"{why}: {rs.describe(binding, self.model)}')
         return True
 
     # ---------- game profiles ----------
@@ -1208,7 +1217,7 @@ class App(tk.Tk):
             self.cfg['active'] = active
             self.write_cfg()
             self.refresh_list()
-        self.set_status(f'Mouse is on "{active}": {rs.describe(on_mouse, self.model)}')
+        self.set_status(f'Mouse is on "{self.shown(active)}": {rs.describe(on_mouse, self.model)}')
 
     # ---------- battery, DPI and staying connected ----------
     def refresh_device(self):
@@ -1470,19 +1479,19 @@ class App(tk.Tk):
         self.write_cfg()
         self.load_profile(name)
         self.refresh_list()
-        self.set_status(f'Made "{name}". Link a game to it if you want.')
+        self.set_status(f'Made "{self.shown(name)}". Link a game to it if you want.')
 
     def export_profile(self):
         from tkinter import filedialog
         if self.current == 'default':
             return
-        path = filedialog.asksaveasfilename(title=f'Export "{self.current}"', initialfile=f'{self.current}.json',
+        path = filedialog.asksaveasfilename(title=f'Export "{self.shown(self.current)}"', initialfile=f'{self.current}.json',
                                             defaultextension='.json', filetypes=[('FreeRazer profiles', '*.json')])
         if not path:
             return
         with open(path, 'w', encoding='utf-8') as f:
             json.dump({'freerazer': 1, 'profiles': {self.current: self.cfg['profiles'][self.current]}}, f, indent=2)
-        self.set_status(f'Exported "{self.current}" to {os.path.basename(path)}.')
+        self.set_status(f'Exported "{self.shown(self.current)}" to {os.path.basename(path)}.')
 
     def import_profiles(self):
         from tkinter import filedialog
@@ -1512,7 +1521,7 @@ def import_file(path, profiles, editable):
             raise ValueError(f'bad profile {name!r}')
         for b, action in binding.items():
             if not str(b).isdigit() or int(b) not in editable:
-                raise ValueError(f'"{name}" uses a button this mouse does not have ({b})')
+                raise ValueError(f'"{self.shown(name)}" uses a button this mouse does not have ({b})')
             rs.encode(action)  # raises ValueError for anything that is not a known action
         clean[name.strip()[:60]] = {str(b): a for b, a in binding.items()}
     added = []
