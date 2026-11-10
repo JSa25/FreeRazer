@@ -9,7 +9,134 @@ A small Windows app for remapping the buttons of Razer mice without Razer Synaps
 | Mouse | USB product ID | Status |
 |---|---|---|
 | Viper V4 Pro (dongle and cable) | 0x00E6 | Verified: read and write |
-| Any other Razer mouse | | Read-only: the app shows its bindings but won't change them |
+| Every other Razer mouse (list below) | | Not tested. The app only reads from it and never writes to it |
+
+<details>
+<summary>All 117 other Razer mice (not tested)</summary>
+
+Names and USB product IDs come from [OpenRazer](https://github.com/openrazer/openrazer) (`daemon/openrazer_daemon/hardware/mouse.py`, commit `477f4d6`, 2026-10-05). Wired, wireless and receiver versions of one mouse have separate IDs.
+
+| Mouse | USB product ID |
+|---|---|
+| Abyssus | 0x0042 |
+| Abyssus 1800 | 0x0020 |
+| Abyssus 2000 | 0x005E |
+| Abyssus Elite (D.Va Edition) | 0x006A |
+| Abyssus Essential | 0x006B |
+| Abyssus V2 | 0x005B |
+| Atheris (Receiver) | 0x0062 |
+| Basilisk | 0x0064 |
+| Basilisk Essential | 0x0065 |
+| Basilisk Mobile (Receiver) | 0x00D4 |
+| Basilisk Mobile (Wired) | 0x00D3 |
+| Basilisk Ultimate | 0x0086 |
+| Basilisk Ultimate (Receiver) | 0x0088 |
+| Basilisk V2 | 0x0085 |
+| Basilisk V3 | 0x0099 |
+| Basilisk V3 35K | 0x00CB |
+| Basilisk V3 Pro (Wired) | 0x00AA |
+| Basilisk V3 Pro (Wireless) | 0x00AB |
+| Basilisk V3 Pro 35K (Wired) | 0x00CC |
+| Basilisk V3 Pro 35K (Wireless) | 0x00CD |
+| Basilisk V3 Pro 35K Phantom Green Edition (Wired) | 0x00D6 |
+| Basilisk V3 Pro 35K Phantom Green Edition (Wireless) | 0x00D7 |
+| Basilisk V3 X HyperSpeed | 0x00B9 |
+| Basilisk X HyperSpeed | 0x0083 |
+| Cobra | 0x00A3 |
+| Cobra HyperSpeed | 0x00DA |
+| Cobra HyperSpeed Receiver | 0x00DB |
+| Cobra Pro (Wired) | 0x00AF |
+| Cobra Pro (Wireless) | 0x00B0 |
+| DeathAdder 1800 | 0x0038 |
+| DeathAdder 2000 | 0x004F |
+| DeathAdder 2013 | 0x0037 |
+| DeathAdder 3.5G | 0x0016 |
+| DeathAdder 3.5G Black | 0x0029 |
+| DeathAdder 3500 | 0x0054 |
+| DeathAdder Chroma | 0x0043 |
+| DeathAdder Elite | 0x005C |
+| DeathAdder Essential | 0x006E |
+| DeathAdder Essential (2021) | 0x0098 |
+| DeathAdder Essential (White Edition) | 0x0071 |
+| DeathAdder V2 | 0x0084 |
+| DeathAdder V2 Lite | 0x00A1 |
+| DeathAdder V2 Mini | 0x008C |
+| DeathAdder V2 Pro (Wired) | 0x007C |
+| DeathAdder V2 Pro (Wireless) | 0x007D |
+| DeathAdder V2 X HyperSpeed | 0x009C |
+| DeathAdder V3 | 0x00B2 |
+| DeathAdder V3 HyperSpeed (Wired) | 0x00C4 |
+| DeathAdder V3 HyperSpeed (Wireless) | 0x00C5 |
+| DeathAdder V3 Pro (Wired) | 0x00B6 |
+| DeathAdder V3 Pro (Wired) | 0x00C2 |
+| DeathAdder V3 Pro (Wireless) | 0x00B7 |
+| DeathAdder V3 Pro (Wireless) | 0x00C3 |
+| DeathAdder V4 Pro (Wired) | 0x00BE |
+| DeathAdder V4 Pro (Wireless) | 0x00BF |
+| Diamondback Chroma | 0x004C |
+| HyperPolling Wireless Dongle | 0x00B3 |
+| Imperator 2012 | 0x002F |
+| Lancehead (Wired) | 0x0059 |
+| Lancehead (Wireless) | 0x005A |
+| Lancehead Tournament Edition | 0x0060 |
+| Lancehead Wireless (Receiver) | 0x006F |
+| Lancehead Wireless (Wired) | 0x0070 |
+| Mamba 2012 (Wired) | 0x0024 |
+| Mamba 2012 (Wireless) | 0x0025 |
+| Mamba Chroma (Wired) | 0x0044 |
+| Mamba Chroma (Wireless) | 0x0045 |
+| Mamba Elite | 0x006C |
+| Mamba Tournament Edition | 0x0046 |
+| Mamba Wireless (Receiver) | 0x0072 |
+| Mamba Wireless (Wired) | 0x0073 |
+| Naga | 0x0015 |
+| Naga 2012 | 0x002E |
+| Naga 2014 | 0x0040 |
+| Naga Chroma | 0x0053 |
+| Naga Epic | 0x001F |
+| Naga Epic Chroma (Wired) | 0x003E |
+| Naga Epic Chroma (Wireless) | 0x003F |
+| Naga Hex | 0x0041 |
+| Naga Hex (Red) | 0x0036 |
+| Naga Hex V2 | 0x0050 |
+| Naga Left Handed Edition 2020 | 0x008D |
+| Naga Pro (Wired) | 0x008F |
+| Naga Pro (Wireless) | 0x0090 |
+| Naga Trinity | 0x0067 |
+| Naga V2 HyperSpeed (Receiver) | 0x00B4 |
+| Naga V2 Pro (Wired) | 0x00A7 |
+| Naga V2 Pro (Wireless) | 0x00A8 |
+| Naga X | 0x0096 |
+| Orochi (Wired) | 0x0048 |
+| Orochi 2011 | 0x0013 |
+| Orochi 2013 | 0x0039 |
+| Orochi V2 (Bluetooth) | 0x0095 |
+| Orochi V2 (Receiver) | 0x0094 |
+| Ouroboros | 0x0032 |
+| Pro Click (Receiver) | 0x0077 |
+| Pro Click (Wired) | 0x0080 |
+| Pro Click Mini (Receiver) | 0x009A |
+| Pro Click V2 (Wired) | 0x00D0 |
+| Pro Click V2 (Wireless) | 0x00D1 |
+| Pro Click V2 Vertical Edition (Wired) | 0x00C7 |
+| Pro Click V2 Vertical Edition (Wireless) | 0x00C8 |
+| Taipan | 0x0034 |
+| Viper | 0x0078 |
+| Viper 8KHz | 0x0091 |
+| Viper Mini | 0x008A |
+| Viper Mini SE (Wired) | 0x009E |
+| Viper Mini SE (Wireless) | 0x009F |
+| Viper Ultimate (Wired) | 0x007A |
+| Viper Ultimate (Wireless) | 0x007B |
+| Viper V2 Pro (Wired) | 0x00A5 |
+| Viper V2 Pro (Wireless) | 0x00A6 |
+| Viper V3 HyperSpeed | 0x00B8 |
+| Viper V3 Pro (Wired) | 0x00C0 |
+| Viper V3 Pro (Wireless) | 0x00C1 |
+| Viper V3 Pro SE (Wired) | 0x00DE |
+| Viper V3 Pro SE (Wireless) | 0x00DF |
+
+</details>
 
 Writes are refused for any mouse or button that is not in a verified entry of the device table (`DEVICES` in `razer_switch.py`). The app only ever reads and sets button bindings; it never touches firmware, lighting or DPI tables.
 
