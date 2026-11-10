@@ -1,0 +1,8 @@
+__pycache__/
+build/
+dist/
+*.spec
+*.exe
+*.tmp
+# personal profiles (the app keeps them in %APPDATA%\MouseProfiles)
+profiles.json
