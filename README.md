@@ -134,6 +134,91 @@ Names and USB product IDs from [OpenRazer](https://github.com/openrazer/openraze
 
 </details>
 
+## Supported keyboards
+
+<details>
+<summary>Supported keyboards (73)</summary>
+
+Names and USB product IDs from [OpenRazer](https://github.com/openrazer/openrazer).
+
+| Keyboard | USB product ID |
+|---|---|
+| Anansi | 0x010F |
+| BlackWidow (Classic) | 0x011B |
+| BlackWidow 2019 | 0x0241 |
+| BlackWidow Chroma (Overwatch) | 0x0211 |
+| BlackWidow Chroma V2 | 0x0221 |
+| BlackWidow Chroma | 0x0203 |
+| BlackWidow Elite | 0x0228 |
+| BlackWidow Essential | 0x0237 |
+| BlackWidow Lite | 0x0235 |
+| BlackWidow Stealth Edition | 0x010E |
+| BlackWidow Tournament Edition 2014 | 0x011C |
+| BlackWidow Tournament Edition Chroma | 0x0209 |
+| BlackWidow Ultimate 2012 | 0x010D |
+| BlackWidow Ultimate 2013 | 0x011A |
+| BlackWidow Ultimate 2016 | 0x0214 |
+| BlackWidow V3 Mini HyperSpeed (Wired) | 0x0258 |
+| BlackWidow V3 Mini HyperSpeed (Wireless) | 0x0271 |
+| BlackWidow V3 Pro 2.4 Ghz Wireless | 0x025C |
+| BlackWidow V3 Pro Wired | 0x025A |
+| BlackWidow V3 TK | 0x0A24 |
+| BlackWidow V3 | 0x024E |
+| BlackWidow V4 75% | 0x02A5 |
+| BlackWidow V4 Mini HyperSpeed (Wired) | 0x02B9 |
+| BlackWidow V4 Mini HyperSpeed (Wireless) | 0x02BA |
+| BlackWidow V4 Pro | 0x028D |
+| BlackWidow V4 Tenkeyless HyperSpeed (Wired) | 0x02D7 |
+| BlackWidow V4 Tenkeyless HyperSpeed (Wireless) | 0x02D5 |
+| BlackWidow V4 X | 0x0293 |
+| BlackWidow V4 | 0x0287 |
+| BlackWidow X Chroma | 0x0216 |
+| BlackWidow X Tournament Edition Chroma | 0x021A |
+| BlackWidow X Ultimate | 0x0217 |
+| Cynosa Chroma Pro | 0x022C |
+| Cynosa Chroma | 0x022A |
+| Cynosa Lite | 0x023F |
+| Cynosa V2 | 0x025E |
+| DeathStalker Chroma | 0x0204 |
+| DeathStalker Expert | 0x0202 |
+| DeathStalker V2 Pro (Wired) | 0x0292 |
+| DeathStalker V2 Pro (Wireless) | 0x0290 |
+| DeathStalker V2 Pro TKL (Wired) | 0x0298 |
+| DeathStalker V2 Pro TKL (Wireless) | 0x0296 |
+| DeathStalker V2 | 0x0295 |
+| DeathStalker/DeathStalker Essential | 0x0118 |
+| Huntsman Elite | 0x0226 |
+| Huntsman Mini Analog | 0x0282 |
+| Huntsman Mini JP | 0x0269 |
+| Huntsman Mini | 0x0257 |
+| Huntsman Tournament Edition | 0x0243 |
+| Huntsman V2 Analog | 0x0266 |
+| Huntsman V2 Tenkeyless | 0x026B |
+| Huntsman V2 | 0x026C |
+| Huntsman V3 Pro 8KHz | 0x02CF |
+| Huntsman V3 Pro Mini | 0x02B0 |
+| Huntsman V3 Pro TKL | 0x02A7 |
+| Huntsman V3 Pro | 0x02A6 |
+| Huntsman | 0x0227 |
+| Joro | 0x02CD |
+| Nostromo | 0x0111 |
+| Orbweaver Chroma | 0x0207 |
+| Orbweaver | 0x0113 |
+| Ornata Chroma | 0x021E |
+| Ornata V2 | 0x025D |
+| Ornata V3 (Alternate) | 0x028F |
+| Ornata V3 Tenkeyless | 0x02A3 |
+| Ornata V3 X (Alternate) | 0x02A2 |
+| Ornata V3 X | 0x0294 |
+| Ornata V3 | 0x02A1 |
+| Ornata | 0x021F |
+| Tartarus Chroma | 0x0208 |
+| Tartarus Pro | 0x0244 |
+| Tartarus V2 | 0x022B |
+| Tartarus | 0x0201 |
+
+</details>
+
 The app only reads and sets button bindings, DPI and polling rate; it never touches firmware or lighting.
 
 Want your mouse supported? See [Adding a mouse](#adding-a-mouse).
