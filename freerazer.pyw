@@ -63,8 +63,17 @@ VK_KEYS = {0x08: 'backspace', 0x09: 'tab', 0x0D: 'enter', 0x14: 'capslock', 0x1B
 W, H, CX = 720, 340, 360
 # button: (side, label row y, target x from centre, target y). Rows are evenly spaced and ordered like the
 # targets, so each leader (straight out, then one bend into its button) never crosses another.
-LABELS = {1: ('l', 45, -35, 55), 3: ('l', 100, -8, 65), 5: ('l', 155, -74, 136), 4: ('l', 210, -76, 184),
-          2: ('r', 45, 35, 55), 9: ('r', 100, 4, 42), 10: ('r', 155, 3, 87), 0x60: ('r', 210, 9, 230)}
+# Side buttons and both clicks sit level with their row, so those leaders are dead straight.
+LABELS = {1: ('l', 45, -35, 45), 3: ('l', 95, -8, 65), 5: ('l', 145, -78, 145), 4: ('l', 195, -80, 195),
+          2: ('r', 45, 35, 45), 9: ('r', 95, 4, 42), 10: ('r', 145, 3, 87), 0x60: ('r', 195, 9, 230)}
+REACH = 125  # label dots sit this far from the centre line
+
+
+def leader(b):
+    """Points of button b's leader line: from its label, to its dot, to the bend outside the shell, into the button."""
+    side, y, tx, ty = LABELS[b]
+    s = -1 if side == 'l' else 1
+    return [(CX + s * (REACH + 45), y), (CX + s * REACH, y), (CX + s * (REACH - 35), y), (CX + tx, ty)]
 
 
 APP_VERSION = '1.0.0'  # build.ps1 reads this; bump it for every release
@@ -177,6 +186,85 @@ def slider_to_dpi(v, rng=rs.DPI_RANGE):
     """The DPI slider runs 0..1000 on a log scale, so 400-3200 (where most people sit) isn't squeezed into a sliver."""
     lo, hi = rng
     return max(lo, min(hi, round(lo * (hi / lo) ** (v / 1000) / 50) * 50))
+
+
+def rounded_image(size, r, fill, outline=None, k=1.0):
+    """Anti-aliased rounded rectangle (or circle when r is half the size) with transparent corners."""
+    from PIL import Image, ImageDraw, ImageTk
+    w, h = (round(v * k) for v in size)
+    S = 4
+    img = Image.new('RGBA', (w * S, h * S), (0, 0, 0, 0))
+    ImageDraw.Draw(img).rounded_rectangle((0, 0, w * S - 1, h * S - 1), radius=round(r * k * S), fill=fill,
+                                          outline=outline, width=S if outline else 0)
+    return ImageTk.PhotoImage(img.resize((w, h), Image.LANCZOS))
+
+
+def chevron_image(up, color, k=1.0):
+    """A small anti-aliased arrow for combobox and spinbox buttons, on a transparent background."""
+    from PIL import Image, ImageDraw, ImageTk
+    w, h, S = round(10 * k), round(6 * k), 4
+    img = Image.new('RGBA', (w * S, h * S), (0, 0, 0, 0))
+    pts = [(S, h * S - S * 1.5), (w * S / 2, S * 1.5), (w * S - S, h * S - S * 1.5)]
+    if not up:
+        pts = [(x, h * S - y) for x, y in pts]
+    ImageDraw.Draw(img).line(pts, fill=color, width=round(1.5 * k * S), joint='curve')
+    return ImageTk.PhotoImage(img.resize((w, h), Image.LANCZOS))
+
+
+class Slider(tk.Canvas):
+    """A rounded track with a round knob (tk.Scale can only draw square ones). `command` gets the value
+    while dragging; `release` runs once the knob is let go, which is when the mouse gets the new value."""
+
+    def __init__(self, parent, from_, to, length, k, command=None, release=None, bg=BG):
+        self.h, self.r = round(20 * k), round(8 * k)
+        super().__init__(parent, width=length, height=self.h, bg=bg, highlightthickness=0, bd=0, takefocus=1,
+                         cursor='hand2')
+        self.lo, self.hi, self.val, self.length = from_, to, from_, length
+        self.command, self.release, self.on = command, release, True
+        self.knobs = {c: rounded_image((16, 16), 8, c, k=k) for c in (ACCENT, DIM)}
+        y, width = self.h / 2, max(2, round(4 * k))
+        self.create_line(self.r, y, length - self.r, y, width=width, capstyle='round', fill=PANEL)
+        self.fill = self.create_line(self.r, y, self.r, y, width=width, capstyle='round', fill=ACCENT)
+        self.knob = self.create_image(self.r, y, image=self.knobs[ACCENT])
+        self.bind('<Button-1>', lambda e: (self.focus_set(), self._drag(e)))
+        self.bind('<B1-Motion>', self._drag)
+        self.bind('<ButtonRelease-1>', lambda e: self._let_go())
+        for key, step in (('Left', -1), ('Down', -1), ('Right', 1), ('Up', 1)):
+            self.bind(f'<{key}>', lambda e, step=step: self._move(self.val + step))
+            self.bind(f'<KeyRelease-{key}>', lambda e: self._let_go())
+
+    def set(self, value):
+        self.val = min(max(round(value), self.lo), self.hi)
+        span = (self.val - self.lo) / (self.hi - self.lo) if self.hi > self.lo else 0
+        x, y = self.r + span * (self.length - 2 * self.r), self.h / 2
+        self.coords(self.fill, self.r, y, x, y)
+        self.coords(self.knob, x, y)
+
+    def get(self):
+        return self.val
+
+    def set_range(self, lo, hi):
+        self.lo, self.hi = lo, hi
+        self.set(self.val)
+
+    def enable(self, on):
+        self.on = on
+        self.itemconfigure(self.fill, fill=ACCENT if on else DIM)
+        self.itemconfigure(self.knob, image=self.knobs[ACCENT if on else DIM])
+        self.configure(cursor='hand2' if on else '')
+
+    def _drag(self, e):
+        self._move(self.lo + (e.x - self.r) / max(1, self.length - 2 * self.r) * (self.hi - self.lo))
+
+    def _move(self, value):
+        if self.on:
+            self.set(value)
+            if self.command:
+                self.command(self.val)
+
+    def _let_go(self):
+        if self.on and self.release:
+            self.release()
 
 
 def dpi_to_slider(dpi, rng=rs.DPI_RANGE):
@@ -467,6 +555,7 @@ class App(tk.Tk):
                   selectbackground=[('readonly', PANEL)], selectforeground=[('readonly', FG)])
         s.configure('Pop.TCombobox', fieldbackground=SIDE, background=SIDE, bordercolor=SIDE, lightcolor=SIDE, darkcolor=SIDE)
         s.map('Pop.TCombobox', fieldbackground=[('readonly', SIDE)])
+        self._round_styles(s)
         self.option_add('*TCombobox*Listbox.background', PANEL)
         self.option_add('*TCombobox*Listbox.foreground', FG)
         self.option_add('*TCombobox*Listbox.selectBackground', SEL_FILL)
@@ -484,13 +573,13 @@ class App(tk.Tk):
         hd.grid(row=0, column=0, sticky='nsew')
         self.rowconfigure(0, minsize=round(52 * k))
         ttk.Label(hd, text='FreeRazer', style='Title.TLabel').pack(side='left')
-        self.profile_box = ttk.Combobox(hd, state='readonly', width=22)
+        self.profile_box = ttk.Combobox(hd, state='readonly', width=22, style='Head.TCombobox')
         self.profile_box.pack(side='left', padx=(24, 2))
         self.profile_box.bind('<<ComboboxSelected>>', self.on_pick_profile)
         ttk.Button(hd, text='⋯', style='HeadLink.TButton', command=self.profile_menu).pack(side='left')
         self.state_lbl = ttk.Label(hd, style='HeadMuted.TLabel')
         self.state_lbl.pack(side='left', padx=(16, 12))
-        self.apply_btn = ttk.Button(hd, text='Apply to mouse', style='Accent.TButton', command=self.apply)
+        self.apply_btn = ttk.Button(hd, text='Apply to mouse', style='Head.Accent.TButton', command=self.apply)
         self.dev_lbl = ttk.Label(hd, style='HeadMuted.TLabel', text='Looking for the mouse…')
         self.dev_lbl.pack(side='right')
         self.warn_lbl = ttk.Label(hd, style='HeadWarn.TLabel')  # shown while Razer Synapse is running
@@ -553,13 +642,8 @@ class App(tk.Tk):
         self.dpi_box.bind('<Return>', lambda e: self.dpi_changed())
         self.dpi_box.bind('<FocusOut>', lambda e: self.dpi_changed())
         ttk.Label(row, text='DPI', style='Muted.TLabel').pack(side='left', padx=(8, 20))
-        # classic Scale: ttk's clam slider can't drop its outline, this one takes exact colours
-        self.dpi_scale = tk.Scale(row, from_=0, to=1000, orient='horizontal', length=round(360 * k), showvalue=0,
-                                  bd=0, highlightthickness=0, troughcolor=PANEL, bg=ACCENT, activebackground='#5fe84a',
-                                  sliderrelief='flat', sliderlength=round(16 * k), width=round(10 * k),
-                                  command=self.dpi_sliding)
+        self.dpi_scale = Slider(row, 0, 1000, round(360 * k), k, command=self.dpi_sliding, release=self.dpi_changed)
         self.dpi_scale.pack(side='left')
-        self.dpi_scale.bind('<ButtonRelease-1>', lambda e: self.dpi_changed())
         ttk.Label(pg, text='Polling rate', style='H2.TLabel').pack(anchor='w', pady=(32, 0))
         ttk.Label(pg, text='How often the mouse reports its position, per second. Higher feels smoother '
                            'but uses more battery.', style='Muted.TLabel').pack(anchor='w', pady=(2, 12))
@@ -581,12 +665,9 @@ class App(tk.Tk):
             row = ttk.Frame(pg)
             row.pack(anchor='w', pady=(6, 0))
             ttk.Label(row, text=text, width=34).pack(side='left')
-            sc = tk.Scale(row, from_=lo, to=hi, orient='horizontal', length=round(260 * k), showvalue=0,
-                          bd=0, highlightthickness=0, troughcolor=PANEL, bg=ACCENT, activebackground='#5fe84a',
-                          sliderrelief='flat', sliderlength=round(16 * k), width=round(10 * k),
-                          command=lambda v, key=key: self.power_sliding(key, v))
+            sc = Slider(row, lo, hi, round(260 * k), k, command=lambda v, key=key: self.power_sliding(key, v),
+                        release=lambda key=key: self.power_changed(key))
             sc.pack(side='left')
-            sc.bind('<ButtonRelease-1>', lambda e, key=key: self.power_changed(key))
             val = ttk.Label(row, width=8, style='Muted.TLabel')
             val.pack(side='left', padx=(12, 0))
             self.power[key] = (sc, val, unit)
@@ -654,8 +735,8 @@ class App(tk.Tk):
     def _build_popover(self, parent):
         """The button editor: a small card next to the clicked button, closed with Esc or a click elsewhere."""
         k = self.k
-        self.pop = tk.Frame(parent, bg=PANEL, highlightthickness=1, highlightbackground=LEADER, highlightcolor=LEADER)
-        inner = ttk.Frame(self.pop, style='Pop.TFrame', padding=16)
+        self.pop = ttk.Frame(parent, style='Card.TFrame', padding=round(5 * k))  # rounded card; see _round_styles
+        inner = ttk.Frame(self.pop, style='Pop.TFrame', padding=12)
         inner.pack(fill='both')
         top = ttk.Frame(inner, style='Pop.TFrame')
         top.pack(fill='x')
@@ -725,6 +806,74 @@ class App(tk.Tk):
         if key == 'games':
             self.show_games()
 
+    def _round_styles(self, s):
+        """Rounded corners: each style draws its shape as an anti-aliased picture. The corners are see-through
+        and show the style's own background, so every style's background is the colour of what it sits on."""
+        k = self.winfo_fpixels('1i') / 96
+        self._round_imgs = []
+        plain = s.layout('TButton')  # text-only buttons keep the flat layout
+
+        def shape(name, states, outer, r=6):
+            """states: [(state spec or None, fill, outline)], the plain look first."""
+            imgs = [rounded_image((2 * r + 8, 2 * r + 8), r, fill, outline, k) for _, fill, outline in states]
+            self._round_imgs += imgs
+            s.element_create(name, 'image', imgs[0], *[(st, im) for (st, _, _), im in zip(states[1:], imgs[1:])],
+                             border=round((r + 3) * k), padding=0, sticky='nsew')  # padding: the style's own
+            return outer
+
+        def button(style, states, outer, kind='Button'):
+            el = f'{style}.round'
+            shape(el, states, outer)
+            s.layout(style, [(el, {'sticky': 'nsew', 'children': [(f'{kind}.focus', {'sticky': 'nsew', 'children': [
+                (f'{kind}.padding', {'sticky': 'nsew', 'children': [(f'{kind}.label', {'sticky': 'nsew'})]})]})]})])
+            s.configure(style, background=outer, focuscolor=outer)
+            s.map(style, background=[])
+
+        hover = '#2e333d'
+        button('TButton', [(None, PANEL, None), ('pressed', hover, None), ('active', hover, None)], BG)
+        button('Accent.TButton', [(None, ACCENT, None), ('active', '#5fe84a', None)], BG)
+        s.configure('Head.Accent.TButton', background=SIDE, focuscolor=SIDE)
+        button('Field.TButton', [(None, SIDE, None), ('active', BG, None)], PANEL)
+        button('Rec.TButton', [(None, SEL_FILL, ACCENT_DIM)], PANEL)
+        for name in ('Link.TButton', 'HeadLink.TButton', 'PopLink.TButton', 'Nav.TButton', 'NavOn.TButton'):
+            s.layout(name, plain)
+        button('Seg.Toolbutton', [(None, PANEL, None), ('selected', SEL_FILL, ACCENT_DIM), ('active', hover, None)], BG,
+               'Toolbutton')
+        button('PopSeg.Toolbutton', [(None, SIDE, None), ('selected', SEL_FILL, ACCENT_DIM), ('active', BG, None)], PANEL,
+               'Toolbutton')
+
+        # fields: combobox, spinbox, entry. Arrow element names must end in downarrow/uparrow for Tk's bindings.
+        down, up = chevron_image(False, MUTED, k), chevron_image(True, MUTED, k)
+        self._round_imgs += [down, up]
+        s.element_create('Round.downarrow', 'image', down, sticky='', width=round(24 * k))
+        s.element_create('Spin.uparrow', 'image', up, sticky='', width=round(20 * k), height=round(12 * k))
+        s.element_create('Spin.downarrow', 'image', down, sticky='', width=round(20 * k), height=round(12 * k))
+        focus = ('focus', PANEL, ACCENT_DIM)
+        for style, fill, outer in (('TCombobox', PANEL, BG), ('Pop.TCombobox', SIDE, PANEL)):
+            el = f'{style}.round'
+            shape(el, [(None, fill, None), ('disabled', BG, None)], outer)
+            s.layout(style, [(el, {'sticky': 'nsew', 'children': [('Round.downarrow', {'side': 'right', 'sticky': 'ns'}),
+                     ('Combobox.padding', {'sticky': 'nsew', 'children': [('Combobox.textarea', {'sticky': 'nsew'})]})]})])
+            s.configure(style, background=outer, fieldbackground=fill)
+            s.map(style, fieldbackground=[], selectbackground=[('readonly', fill)])
+        s.configure('Head.TCombobox', background=SIDE)
+        shape('TSpinbox.round', [(None, PANEL, None), focus], BG)
+        s.layout('TSpinbox', [('TSpinbox.round', {'side': 'top', 'sticky': 'we', 'children': [
+            ('null', {'side': 'right', 'sticky': '', 'children': [('Spin.uparrow', {'side': 'top', 'sticky': 'e'}),
+                                                                  ('Spin.downarrow', {'side': 'bottom', 'sticky': 'e'})]}),
+            ('Spinbox.padding', {'sticky': 'nsew', 'children': [('Spinbox.textarea', {'sticky': 'nsew'})]})]})])
+        s.configure('TSpinbox', background=BG, padding=(8, 4))
+        shape('TEntry.round', [(None, PANEL, None), focus], BG)
+        s.layout('TEntry', [('TEntry.round', {'sticky': 'nsew', 'children': [
+            ('Entry.padding', {'sticky': 'nsew', 'children': [('Entry.textarea', {'sticky': 'nsew'})]})]})])
+        s.configure('TEntry', background=BG, padding=(8, 5))
+        s.configure('Head.TEntry', background=SIDE)
+
+        # the button editor card
+        shape('Card.round', [(None, PANEL, LEADER)], BG, r=10)
+        s.layout('Card.TFrame', [('Card.round', {'sticky': 'nsew'})])
+        s.configure('Card.TFrame', background=BG)
+
     def _switch(self, parent, text, var, cmd):
         # classic Checkbutton: it can show a drawn switch instead of ttk's boxed tick
         return tk.Checkbutton(parent, text='  ' + text, variable=var, command=cmd, image=self._switch_imgs[0],
@@ -757,7 +906,7 @@ class App(tk.Tk):
         c.delete('all')
         self.labels, self._overlays = {}, {}
         self._draw_line_art()
-        self._draw_labels({b: (CX + tx, ty) for b, (_, _, tx, ty) in LABELS.items() if b in self.buttons}, 125)
+        self._draw_labels()
         c.scale('all', 0, 0, self.k, self.k)
 
     def _draw_line_art(self):
@@ -825,6 +974,11 @@ class App(tk.Tk):
             d.rounded_rectangle(B(box), radius=3 * S, fill=SEL_FILL if sel == b else BG, outline=on(b), width=w)
         for start in range(0, 360, 30) if 0x60 in self.buttons else ():  # dotted ring: DPI button underneath
             d.arc(B(a['dpi']), start, start + 15, fill=ACCENT if sel == 0x60 else LEADER, width=w)
+        for b in (b for b in LABELS if b in self.buttons):  # leader lines, drawn here so they're smooth too
+            pts = leader(b)
+            d.line(P(pts), fill=ACCENT if b == sel else LEADER, width=max(1, round(S)), joint='curve')
+            (x, y), r = pts[1], 2.2 * S
+            d.ellipse((x * S - r, y * S - r, x * S + r, y * S + r), fill=ACCENT if b == sel else LEADER)
         return img.resize((round(W * self.k), round(H * self.k)), Image.LANCZOS)
 
     def show_art(self):
@@ -835,7 +989,7 @@ class App(tk.Tk):
             self._base = ImageTk.PhotoImage(self._render(None))
             self.canvas.itemconfigure(self.art_item, image=self._base)
         if self.sel not in self._overlays:
-            xs, ys = zip(*dict(self.hit)[self.sel])
+            xs, ys = zip(*dict(self.hit)[self.sel], *leader(self.sel))
             k = self.k
             box = (int((min(xs) - 4) * k), int((min(ys) - 4) * k), int((max(xs) + 4) * k) + 1, int((max(ys) + 4) * k) + 1)
             self._overlays[self.sel] = (ImageTk.PhotoImage(self._render(self.sel).crop(box)), box[0], box[1])
@@ -858,28 +1012,19 @@ class App(tk.Tk):
         over = over or any(t.startswith('b') for t in self.canvas.gettags('current'))
         self.canvas.configure(cursor='hand2' if over else '')
 
-    def _draw_labels(self, targets, reach):
-        """Action text in two columns, each with a leader line to its button."""
-        c, cx = self.canvas, CX
+    def _draw_labels(self):
+        """Action text in two columns; their leader lines are part of the picture (see _render)."""
+        c = self.canvas
         for b, (side, y, _, _) in LABELS.items():
             if b not in self.buttons:
                 continue
             s = -1 if side == 'l' else 1
-            x_text, x_dot = cx + s * (reach + 53), cx + s * reach
-            tx, ty = targets[b]
-            x_bend = cx + s * (reach - 35)  # just outside the shell, so the slanted part only runs over the mouse
-            lines = (c.create_line(cx + s * (reach + 45), y, x_dot, y, fill=LEADER),
-                     c.create_line(x_dot, y, x_bend, y, tx, ty, fill=LEADER))
-            dot = c.create_oval(x_dot - 2, y - 2, x_dot + 2, y + 2, fill=LEADER, outline=LEADER)
-            text = c.create_text(x_text, y, anchor='e' if side == 'l' else 'w', font=FONT, tags=(f'b{b}',))
-            self.labels[b] = (text, dot, lines)
+            text = c.create_text(CX + s * (REACH + 53), y, anchor='e' if side == 'l' else 'w', font=FONT, tags=(f'b{b}',))
+            self.labels[b] = (text,)
             if b in self.editable:
                 c.tag_bind(f'b{b}', '<Button-1>', lambda e, b=b: self.select(b))
             else:
                 c.tag_bind(f'b{b}', '<Button-1>', lambda e: self.set_status('Left click is locked so you can always click.'))
-        for item in c.find_withtag('all'):
-            if c.type(item) not in ('text', 'image'):
-                c.tag_raise(item)  # leader lines above the picture
 
     def on_canvas_click(self, e):
         self.canvas.focus_set()
@@ -937,17 +1082,13 @@ class App(tk.Tk):
 
     def redraw(self):
         c = self.canvas
-        for b, (text, dot, lines) in self.labels.items():
+        for b, (text,) in self.labels.items():
             editable, sel = b in self.editable, b == self.sel
             action = self.effective(b)[0] if editable else self.buttons[b][1]
             # like Synapse: green = remapped, white = factory, dim = can't change
             color = DIM if not editable else ACCENT if action != self.buttons[b][1] else FG
             c.itemconfigure(text, text=rs.pretty(action), fill=color,
                             font=('Segoe UI Semibold', 10) if sel else FONT)
-            lead = ACCENT if sel else LEADER
-            for item in (*lines, dot):
-                c.itemconfigure(item, fill=lead)
-            c.itemconfigure(dot, outline=lead)
         self.show_art()
         action, source = self.effective(self.sel)
         self.btn_name.configure(text=self.buttons[self.sel][0])
@@ -1079,7 +1220,7 @@ class App(tk.Tk):
         """Edit the profile's name right over the header's profile picker. Enter keeps it, Esc cancels."""
         if self.current == 'default':
             return self.set_status('Default can\'t be renamed.')
-        entry = ttk.Entry(self.head)
+        entry = ttk.Entry(self.head, style='Head.TEntry')
         entry.insert(0, self.current)
         entry.select_range(0, 'end')
         entry.place(in_=self.profile_box, x=0, y=0, relwidth=1, relheight=1)
@@ -1277,9 +1418,9 @@ class App(tk.Tk):
             self.dev_lbl.configure(text='Mouse not connected', style='HeadMuted.TLabel')
             for w in (self.dpi_box, *self.poll_btns):
                 w.state(['disabled'])
-            self.dpi_scale.configure(state='disabled', bg=DIM)
+            self.dpi_scale.enable(False)
             for sc, _, _ in self.power.values():
-                sc.configure(state='disabled', bg=DIM)
+                sc.enable(False)
             self.perf_note.configure(text='Connect the mouse (plug it in or switch it on) to change these.')
             if self._connected:
                 self.set_status('Mouse disconnected. Profiles still save; they go on the mouse when it is back.')
@@ -1295,17 +1436,17 @@ class App(tk.Tk):
             rb.grid() if int(rb.cget('value')) in rates else rb.grid_remove()
         for w in (self.dpi_box, *self.poll_btns):
             w.state(['!disabled'] if verified else ['disabled'])
-        self.dpi_scale.configure(state='normal' if verified else 'disabled', bg=ACCENT if verified else DIM)
+        self.dpi_scale.enable(verified)
         self.perf_note.configure(text='' if verified else f'{model["name"]} is read-only until it is verified.')
         if self.focus_get() is not self.dpi_box:  # don't overwrite a number being typed
             self.dpi_var.set(str(x))
             self.dpi_scale.set(dpi_to_slider(x, self.dpi_rng))
         self.poll_var.set(hz or 0)
         self._shown = {'dpi': x, 'hz': hz}
-        self.power['low'][0].configure(to=rs.low_power_range(model)[1])
+        self.power['low'][0].set_range(*rs.low_power_range(model))
         for (key, (sc, _, _)), value in zip(self.power.items(), power or (None, None)):
             usable = verified and power is not None  # a mouse that refuses these has no power settings to change
-            sc.configure(state='normal' if usable else 'disabled', bg=ACCENT if usable else DIM)
+            sc.enable(usable)
             if value is not None:
                 sc.set(value)
                 self.power_sliding(key, value)
@@ -1346,7 +1487,7 @@ class App(tk.Tk):
 
     def power_changed(self, key):
         v = int(self.power[key][0].get())
-        if str(self.power[key][0].cget('state')) == 'disabled' or v == self._shown.get(key):
+        if not self.power[key][0].on or v == self._shown.get(key):
             return
         self._shown[key] = v
         if key == 'sleep':
