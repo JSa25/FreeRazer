@@ -40,6 +40,7 @@ DPI_CHOICES = [a for a in rs.ACTIONS if a.startswith('dpi:')]
 REC_IDLE = 'Click, then press a key or combo'
 PAGE_PAD = 24  # content margin around every page (Windows app guidance)
 LIGHT_NAMES = {'off': 'Off', 'static': 'Static', 'breathing': 'Breathing', 'spectrum': 'Rainbow'}
+LIGHT_PRESETS = ('#44d62c', '#ff0000', '#ff7a00', '#ffd400', '#00e5ff', '#0050ff', '#9b30ff', '#ff2d95', '#ffffff')
 
 # Tk key names -> razer_switch key names (letters, digits and F-keys map by lowercasing)
 TK_KEYS = {'Return': 'enter', 'Escape': 'esc', 'BackSpace': 'backspace', 'Tab': 'tab', 'space': 'space',
@@ -277,6 +278,74 @@ class Slider(tk.Canvas):
     def _let_go(self):
         if self.on and self.release:
             self.release()
+
+
+def hex_color(rgb):
+    return '#%02x%02x%02x' % tuple(rgb)
+
+
+def hue_rgb(hue):
+    import colorsys
+    return tuple(round(v * 255) for v in colorsys.hsv_to_rgb(hue / 360, 1, 1))
+
+
+class HueSlider(Slider):
+    """Slider over every hue (0-359) on a rainbow track; the knob shows the light's colour."""
+
+    def __init__(self, parent, length, k, command=None, release=None, bg=BG):
+        super().__init__(parent, 0, 359, length, k, command, release, bg)
+        from PIL import Image, ImageDraw, ImageTk
+        self.k = k
+        self.delete('all')
+        r, h, S = self.r, round(8 * k), 4
+        w = length - 2 * r + h  # rounded ends reach past the knob's travel by half the track height
+        grad = Image.new('RGB', (w * S, h * S))
+        d = ImageDraw.Draw(grad)
+        for px in range(w * S):  # the hue under each pixel matches the value the knob gives there
+            d.line((px, 0, px, h * S), fill=hue_rgb(min(max((px / S - h / 2) / (length - 2 * r), 0), 1) * 359))
+        mask = Image.new('L', (w * S, h * S), 0)
+        ImageDraw.Draw(mask).rounded_rectangle((0, 0, w * S - 1, h * S - 1), radius=h * S // 2, fill=255)
+        grad.putalpha(mask)
+        self.track_img = ImageTk.PhotoImage(grad.resize((w, h), Image.LANCZOS))
+        self.create_image(length / 2, self.h / 2, image=self.track_img)
+        self.fill = self.create_line(0, 0, 0, 0, state='hidden')  # Slider.set moves it; nothing to show here
+        self.ring_img = rounded_image((18, 18), 9, '#ffffff', k=k)
+        self.ring = self.create_image(r, self.h / 2, image=self.ring_img)
+        self.knob = self.create_image(r, self.h / 2)
+        self.show((0, 255, 0))
+
+    def set(self, value):
+        super().set(value)
+        self.coords(self.ring, *self.coords(self.knob))
+
+    def show(self, rgb):
+        self.knob_img = rounded_image((13, 13), 6.5, hex_color(rgb), k=self.k)
+        self.itemconfigure(self.knob, image=self.knob_img)
+
+    def enable(self, on):
+        self.on = on
+        self.configure(cursor='hand2' if on else '')
+
+
+class ColorDots(tk.Canvas):
+    """A row of round colour presets; the picked one gets a ring. `command` gets the (r, g, b) clicked."""
+
+    def __init__(self, parent, colors, k, command, bg=BG):
+        self.step, size = round(28 * k), round(24 * k)
+        super().__init__(parent, width=self.step * len(colors), height=size, bg=bg, highlightthickness=0, bd=0,
+                         cursor='hand2')
+        self.colors = [tuple(int(c[i:i + 2], 16) for i in (1, 3, 5)) for c in colors]
+        self.imgs = [rounded_image((16, 16), 8, c, k=k) for c in colors]
+        self.ring_img = rounded_image((22, 22), 11, BG, outline=FG, k=k)
+        self.ring = self.create_image(-100, size / 2, image=self.ring_img)
+        for i, img in enumerate(self.imgs):
+            x = self.step * i + self.step / 2
+            self.create_image(x, size / 2, image=img, tags=(f'c{i}',))
+            self.tag_bind(f'c{i}', '<Button-1>', lambda e, i=i: command(self.colors[i]))
+
+    def show(self, rgb):
+        i = self.colors.index(tuple(rgb)) if tuple(rgb) in self.colors else None
+        self.coords(self.ring, -100 if i is None else self.step * i + self.step / 2, self.winfo_reqheight() / 2)
 
 
 def dpi_to_slider(dpi, rng=rs.DPI_RANGE):
@@ -689,13 +758,17 @@ class App(tk.Tk):
         row = ttk.Frame(self.light_box)
         row.pack(anchor='w')
         self.light_var = tk.StringVar()
-        self._rgb = (0, 255, 0)  # colour for Static and Breathing, kept while another effect is on
+        self._rgb = (0x44, 0xD6, 0x2C)  # colour for Static and Breathing, kept while another effect is on
         for i, (key, text) in enumerate(LIGHT_NAMES.items()):
-            ttk.Radiobutton(row, text=text, value=key, variable=self.light_var, style='Seg.Toolbutton', width=9,
+            ttk.Radiobutton(row, text=text, value=key, variable=self.light_var, style='Seg.Toolbutton', width=11,
                             command=self.light_changed).grid(row=0, column=i, padx=(0 if i == 0 else 2, 0))
-        ttk.Button(row, text='Color…', style='Field.TButton', command=self.pick_colour).grid(row=0, column=4, padx=(16, 0))
-        self.swatch = tk.Frame(row, width=round(22 * k), height=round(22 * k), bg=BG)
-        self.swatch.grid(row=0, column=5, padx=(8, 0))
+        row = ttk.Frame(self.light_box)
+        row.pack(anchor='w', pady=(12, 0))
+        ttk.Label(row, text='Color', width=34).pack(side='left')
+        self.hue = HueSlider(row, round(260 * k), k, command=self.hue_sliding, release=self.light_changed)
+        self.hue.pack(side='left')
+        self.dots = ColorDots(row, LIGHT_PRESETS, k, command=self.pick_color)
+        self.dots.pack(side='left', padx=(20, 0))
         row = ttk.Frame(self.light_box)
         row.pack(anchor='w', pady=(12, 0))
         ttk.Label(row, text='Brightness', width=34).pack(side='left')
@@ -1620,7 +1693,7 @@ class App(tk.Tk):
             if effect in ('static', 'breathing'):  # other effects read back no colour; keep the last one
                 self._rgb = rgb
             self.light_var.set(effect)
-            self.swatch.configure(bg='#%02x%02x%02x' % self._rgb)
+            self.show_color()
             self.bright.set(bright)
             self.bright_val.configure(text=f'{bright}%')
             self._shown.update(light=(effect, self._rgb), bright=bright)
@@ -1675,14 +1748,25 @@ class App(tk.Tk):
         self._shown['light'] = (effect, rgb)
         self._send(lambda: self.mouse.set_lighting(effect, rgb), f'Lighting set to {LIGHT_NAMES[effect]}.')
 
-    def pick_colour(self):
-        from tkinter import colorchooser
-        rgb = colorchooser.askcolor('#%02x%02x%02x' % self._rgb, parent=self, title='Light color')[0]
-        if not rgb:
-            return
-        self._rgb = tuple(int(c) for c in rgb)
-        self.swatch.configure(bg='#%02x%02x%02x' % self._rgb)
+    def show_color(self, move_hue=True):
+        import colorsys
+        h, s, _ = colorsys.rgb_to_hsv(*(v / 255 for v in self._rgb))
+        if move_hue and s > 0.2:  # white and greys have no hue; the knob stays where it was
+            self.hue.set(h * 360)
+        self.hue.show(self._rgb)
+        self.dots.show(self._rgb)
+
+    def hue_sliding(self, hue):
+        """While the knob moves only the picture follows; the mouse gets the colour when it is let go."""
+        self._rgb = hue_rgb(hue)
+        self.show_color(move_hue=False)
         if self.light_var.get() not in ('static', 'breathing'):  # a colour means a one-colour effect
+            self.light_var.set('static')
+
+    def pick_color(self, rgb):
+        self._rgb = rgb
+        self.show_color()
+        if self.light_var.get() not in ('static', 'breathing'):
             self.light_var.set('static')
         self.light_changed()
 
