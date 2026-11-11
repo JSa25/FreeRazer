@@ -327,6 +327,31 @@ class HueSlider(Slider):
         self.configure(cursor='hand2' if on else '')
 
 
+def swatch_image(rgb, w, h):
+    """The light's colour as a rounded chip with a small down arrow (it opens the picker)."""
+    from PIL import Image, ImageDraw, ImageTk
+    S = 4
+    img = Image.new('RGBA', (w * S, h * S), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    d.rounded_rectangle((0, 0, w * S - 1, h * S - 1), radius=h * S // 2, fill=PANEL)
+    d.rounded_rectangle((3 * S, 3 * S, (w - 22) * S, (h - 3) * S), radius=(h - 6) * S // 2, fill=hex_color(rgb))
+    cx, cy = (w - 11) * S, h * S // 2
+    d.line([(cx - 4 * S, cy - 2 * S), (cx, cy + 2 * S), (cx + 4 * S, cy - 2 * S)], fill=MUTED, width=round(1.5 * S),
+           joint='curve')
+    return ImageTk.PhotoImage(img.resize((w, h), Image.LANCZOS))
+
+
+def ring_image(k):
+    """Hollow white ring with a dark edge, so the picker's knob shows on any colour."""
+    from PIL import Image, ImageDraw, ImageTk
+    n, S = round(16 * k), 4
+    img = Image.new('RGBA', (n * S, n * S), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    d.ellipse((0, 0, n * S - 1, n * S - 1), outline=(0, 0, 0, 140), width=round(4 * k * S))
+    d.ellipse((S, S, (n - 1) * S - 1, (n - 1) * S - 1), outline='#ffffff', width=round(2 * k * S))
+    return ImageTk.PhotoImage(img.resize((n, n), Image.LANCZOS))
+
+
 class ColorDots(tk.Canvas):
     """A row of round colour presets; the picked one gets a ring. `command` gets the (r, g, b) clicked."""
 
@@ -765,8 +790,13 @@ class App(tk.Tk):
         row = ttk.Frame(self.light_box)
         row.pack(anchor='w', pady=(12, 0))
         ttk.Label(row, text='Color', width=34).pack(side='left')
-        self.hue = HueSlider(row, round(260 * k), k, command=self.hue_sliding, release=self.light_changed)
-        self.hue.pack(side='left')
+        # the current colour; click it for the detailed picker
+        self.swatch = tk.Canvas(row, width=round(64 * k), height=round(26 * k), bg=BG, highlightthickness=0,
+                                cursor='hand2', takefocus=1)
+        self.swatch_item = self.swatch.create_image(0, 0, anchor='nw')
+        self.swatch.pack(side='left')
+        self.swatch.bind('<Button-1>', lambda e: self.open_picker())
+        self.swatch.bind('<Return>', lambda e: self.open_picker())
         self.dots = ColorDots(row, LIGHT_PRESETS, k, command=self.pick_color)
         self.dots.pack(side='left', padx=(20, 0))
         row = ttk.Frame(self.light_box)
@@ -1748,23 +1778,146 @@ class App(tk.Tk):
         self._shown['light'] = (effect, rgb)
         self._send(lambda: self.mouse.set_lighting(effect, rgb), f'Lighting set to {LIGHT_NAMES[effect]}.')
 
-    def show_color(self, move_hue=True):
-        import colorsys
-        h, s, _ = colorsys.rgb_to_hsv(*(v / 255 for v in self._rgb))
-        if move_hue and s > 0.2:  # white and greys have no hue; the knob stays where it was
-            self.hue.set(h * 360)
-        self.hue.show(self._rgb)
-        self.dots.show(self._rgb)
+    def show_color(self, rgb=None):
+        """Swatch and preset ring follow `rgb` (default: the light's colour)."""
+        rgb = rgb or self._rgb
+        self._swatch_img = swatch_image(rgb, self.swatch.winfo_reqwidth(), self.swatch.winfo_reqheight())
+        self.swatch.itemconfigure(self.swatch_item, image=self._swatch_img)
+        self.dots.show(rgb)
 
-    def hue_sliding(self, hue):
-        """While the knob moves only the picture follows; the mouse gets the colour when it is let go."""
-        self._rgb = hue_rgb(hue)
-        self.show_color(move_hue=False)
-        if self.light_var.get() not in ('static', 'breathing'):  # a colour means a one-colour effect
-            self.light_var.set('static')
+    def open_picker(self):
+        """Detailed colour picker: saturation/brightness square, hue bar, hex and R/G/B fields. The colour shows
+        while you drag; the mouse gets it when you let go or press Enter."""
+        import colorsys
+        from PIL import Image, ImageDraw, ImageTk
+        k, pad = self.k, round(14 * self.k)
+        top = tk.Toplevel(self, bg=BG, padx=pad, pady=pad)
+        top.overrideredirect(True)
+        top.attributes('-topmost', True)
+        W, H = round(260 * k), round(160 * k)
+        h, s, v = colorsys.rgb_to_hsv(*(c / 255 for c in self._rgb))
+        st = {'h': h * 359, 's': s, 'v': v}
+        sv = tk.Canvas(top, width=W, height=H, bg=BG, highlightthickness=0, cursor='crosshair')
+        sv.pack()
+        sv_item = sv.create_image(0, 0, anchor='nw')
+        top._ring = ring_image(k)
+        knob = sv.create_image(0, 0, image=top._ring)
+        hue = HueSlider(top, W, k)
+        hue.pack(pady=(12, 0))
+        row = tk.Frame(top, bg=BG)
+        row.pack(fill='x', pady=(12, 0))
+        hex_var = tk.StringVar()
+        ttk.Label(row, text='Hex', style='Muted.TLabel').pack(side='left')
+        hex_box = ttk.Entry(row, textvariable=hex_var, width=8)
+        hex_box.pack(side='left', padx=(6, 12))
+        chans = []
+        for name in 'RGB':
+            ttk.Label(row, text=name, style='Muted.TLabel').pack(side='left')
+            var = tk.StringVar()
+            box = ttk.Spinbox(row, textvariable=var, from_=0, to=255, width=3)
+            box.pack(side='left', padx=(4, 8))
+            chans.append((var, box))
+
+        def rgb_now():
+            return tuple(round(c * 255) for c in colorsys.hsv_to_rgb(st['h'] / 359, st['s'], st['v']))
+
+        def paint_square():
+            base = Image.new('RGB', (W, H), hue_rgb(st['h']))
+            across = Image.linear_gradient('L').rotate(-90).resize((W, H))  # white at the left, full colour at the right
+            down = Image.linear_gradient('L').resize((W, H))  # black towards the bottom
+            img = Image.composite(Image.new('RGB', (W, H), '#ffffff'), base, across)
+            img = Image.composite(Image.new('RGB', (W, H), '#000000'), img, down)
+            S = 4
+            mask = Image.new('L', (W * S, H * S), 0)
+            ImageDraw.Draw(mask).rounded_rectangle((0, 0, W * S - 1, H * S - 1), radius=round(8 * k * S), fill=255)
+            img.putalpha(mask.resize((W, H), Image.LANCZOS))
+            top._square = ImageTk.PhotoImage(img)
+            sv.itemconfigure(sv_item, image=top._square)
+
+        def refresh(skip=None):
+            rgb = rgb_now()
+            sv.coords(knob, st['s'] * (W - 1), (1 - st['v']) * (H - 1))
+            hue.set(st['h'])
+            hue.show(rgb)
+            if skip is not hex_box:
+                hex_var.set(hex_color(rgb)[1:].upper())
+            for (var, box), c in zip(chans, rgb):
+                if skip is not box:
+                    var.set(str(c))
+            self.show_color(rgb)
+
+        def from_rgb(rgb, skip=None):
+            hh, ss, vv = colorsys.rgb_to_hsv(*(c / 255 for c in rgb))
+            if ss > 0 and vv > 0:  # greys have no hue; keep the hue bar where it is
+                st['h'] = hh * 359
+            st['s'], st['v'] = ss, vv
+            paint_square()
+            refresh(skip)
+
+        def drag_square(e):
+            st['s'] = min(max(e.x / (W - 1), 0), 1)
+            st['v'] = 1 - min(max(e.y / (H - 1), 0), 1)
+            refresh()
+
+        def drag_hue(value):
+            st['h'] = value
+            paint_square()
+            refresh()
+
+        def send(_=None):
+            self.pick_color(rgb_now())
+
+        def typed_hex(_=None):
+            text = hex_var.get().strip().lstrip('#')
+            if re.fullmatch(r'[0-9a-fA-F]{6}', text):
+                from_rgb(tuple(int(text[i:i + 2], 16) for i in (0, 2, 4)))
+                send()
+            else:
+                refresh()  # not a colour: show the current one again
+
+        def typed_rgb(_=None):
+            try:
+                rgb = tuple(min(max(int(var.get()), 0), 255) for var, _ in chans)
+            except ValueError:
+                return refresh()
+            from_rgb(rgb)
+            send()
+
+        sv.bind('<Button-1>', drag_square)
+        sv.bind('<B1-Motion>', drag_square)
+        sv.bind('<ButtonRelease-1>', send)
+        hue.command, hue.release = drag_hue, send
+        hex_box.bind('<Return>', typed_hex)
+        for var, box in chans:
+            box.configure(command=typed_rgb)
+            box.bind('<Return>', typed_rgb)
+        paint_square()
+        refresh()
+
+        top.update_idletasks()
+        x = min(self.swatch.winfo_rootx(), self.winfo_rootx() + self.winfo_width() - top.winfo_reqwidth())
+        y = self.swatch.winfo_rooty() + self.swatch.winfo_height() + round(6 * k)
+        if y + top.winfo_reqheight() > self.winfo_rooty() + self.winfo_height():  # no room below: open above
+            y = self.swatch.winfo_rooty() - top.winfo_reqheight() - round(6 * k)
+        top.geometry(f'+{x}+{y}')
+        round_corners(top)
+
+        def gone(_=None):
+            if not top.winfo_exists():
+                return
+            try:
+                f = self.focus_get()
+            except KeyError:
+                f = None
+            if not (f and str(f).startswith(str(top))):
+                top.destroy()
+                self.show_color()
+        top.bind('<Escape>', lambda e: (top.destroy(), self.show_color()))
+        top.bind('<FocusOut>', lambda e: top.after(1, gone))
+        top.focus_force()
 
     def pick_color(self, rgb):
-        self._rgb = rgb
+        self._rgb = tuple(rgb)
         self.show_color()
         if self.light_var.get() not in ('static', 'breathing'):
             self.light_var.set('static')

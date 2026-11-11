@@ -1,4 +1,4 @@
-"""Screenshots of the Lighting section with the colour picker in a few states. Sends nothing to any mouse.
+"""Screenshots of the Lighting section and the detailed colour picker. Sends nothing to any mouse.
     py -3.13 color_look.py out_prefix"""
 import ctypes, importlib.util, os, sys
 here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -11,30 +11,49 @@ fr.App.refresh_device = lambda self, repeat=True: None
 ctypes.windll.shcore.SetProcessDpiAwareness(1)
 app = fr.App()
 app.write_cfg = lambda: None
-app._send = lambda write, done: print('would send:', done, flush=True)
+app._send = lambda write, done: print('would send:', done, app._rgb, flush=True)
 app.deiconify()
 app.attributes('-topmost', True)
+
+
+def picker():
+    return next((w for w in app.winfo_children() if isinstance(w, fr.tk.Toplevel) and w.winfo_exists()), None)
 
 
 def shot(name):
     from PIL import ImageGrab
     app.update()
-    b = app.light_box
-    x, y = b.winfo_rootx(), b.winfo_rooty()
-    ImageGrab.grab((x - 10, y - 10, x + app.winfo_width() - 20, y + b.winfo_height() + 10)).save(f'{sys.argv[1]}_{name}.png')
-    print(name, app.light_var.get(), app._rgb, 'hue', app.hue.get(), flush=True)
+    boxes = [(app.winfo_rootx(), app.winfo_rooty(), app.winfo_rootx() + app.winfo_width(), app.winfo_rooty() + app.winfo_height())]
+    p = picker()
+    if p:
+        boxes.append((p.winfo_rootx(), p.winfo_rooty(), p.winfo_rootx() + p.winfo_width(), p.winfo_rooty() + p.winfo_height()))
+    x0, y0 = min(b[0] for b in boxes), min(b[1] for b in boxes)
+    x1, y1 = max(b[2] for b in boxes), max(b[3] for b in boxes)
+    ImageGrab.grab((x0, max(y0, app.light_box.winfo_rooty() - 330), x1, y1)).save(f'{sys.argv[1]}_{name}.png')
+    print(name, app.light_var.get(), app._rgb, flush=True)
+
+
+def ev(widget, x, y):
+    return type('E', (), {'x': x, 'y': y, 'widget': widget})()
 
 
 def run():
     app.show_page('performance')
     app.light_box.pack(anchor='w', before=app.perf_note)
-    app.light_var.set('spectrum'); app.show_color(); app.bright.set(33)
-    shot('start')
-    app.hue_sliding(210); app.hue.set(210); app.light_changed()
-    shot('hue210')
-    app.pick_color((255, 255, 255))
-    shot('white')
-    app.quit_app()
+    app.light_var.set('spectrum'); app.show_color(); app.bright.set(33); app.bright_val.configure(text='33%')
+    shot('row')
+    app.open_picker()
+    app.after(500, step2)
+
+
+def step2():
+    shot('picker')
+    p = picker()
+    sv = next(w for w in p.winfo_children() if isinstance(w, fr.tk.Canvas) and not isinstance(w, fr.HueSlider))
+    hue = next(w for w in p.winfo_children() if isinstance(w, fr.HueSlider))
+    hue._move(280); hue._let_go()  # purple
+    sv.event_generate('<Button-1>', x=60, y=30); sv.event_generate('<ButtonRelease-1>', x=60, y=30)
+    app.after(300, lambda: (shot('picked'), app.quit_app()))
 
 
 app.after(2500, run)
