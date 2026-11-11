@@ -1,4 +1,4 @@
-# FreeRazer
+# FreeRazer 
 
 A small Windows app for remapping the buttons of Razer mice without Razer Synapse. Make profiles, link them to games, and the right one goes onto the mouse when a game is in focus. The mouse keeps the last profile in its own memory, so nothing has to run for it to work.
 
