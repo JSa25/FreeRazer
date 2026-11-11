@@ -322,6 +322,12 @@ Mice without their own drawing get a generic one (`'drawing': 'generic'`).
 
 Captured from Razer's web configurator via WebHID on the owner's own mouse. Feature report 0, 90 bytes: byte 0 status (02 ok, 01 busy), byte 1 transaction ID, byte 5 data size, bytes 6-7 command class and ID, arguments from byte 8, byte 88 the XOR of bytes 2-87. Set a button: class 02 ID 0C, arguments `[profile 01, button, hypershift 00, action type, payload length, payload]`; read: ID 8C. Action types: 01 mouse button, 02 key `[modifiers, HID usage]` (Ctrl 01, Shift 02, Alt 04), 06 DPI. Polling rate: newer mice read with 00/C0 and set with 00/40 (125 to 8000 Hz); older ones such as the DeathAdder V2 Pro refuse 00/C0 and use 00/85 and 00/05 (125, 500, 1000 Hz). The app tries the newer command first. Lighting (OpenRazer's extended matrix, LED 04 = logo): set effect 0F/02 `[storage 01, LED, effect, ...]` with effect 00 off, 01 static `[.., 00, 00, 01, R, G, B]`, 02 breathing `[.., 01, 00, 01, R, G, B]`, 03 spectrum; brightness 0F/04 `[01, LED, 0-255]`; 0F/82 and 0F/84 read them back.
 
+## Credits
+
+FreeRazer stands on the work of the [OpenRazer](https://github.com/openrazer/openrazer) project, the open-source Razer driver for Linux. The supported mice and keyboards lists, the mouse database (`devices.json`) and the lighting commands all come from what OpenRazer's contributors worked out. FreeRazer contains none of OpenRazer's code: `tools/gen_devices.py` reads their driver source and keeps only the facts (device IDs, names, which command each mouse takes). OpenRazer is licensed GPL-2.0. If you use Linux, use OpenRazer.
+
+FreeRazer is not affiliated with or endorsed by Razer or the OpenRazer project.
+
 ## Licence
 
 MIT, see [LICENSE](LICENSE).

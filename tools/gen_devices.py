@@ -122,7 +122,9 @@ def build(c_src, h_src, py_src):
         if feats:
             entry['features'], entry['txn'] = feats, txn
         mice.append(entry)
-    return {'version': int(time.strftime('%Y%m%d')), 'source': 'openrazer', 'mice': mice}
+    return {'version': int(time.strftime('%Y%m%d')), 'source': 'openrazer',
+            'credit': 'Device facts from OpenRazer (https://github.com/openrazer/openrazer, GPL-2.0); no OpenRazer '
+                      'code is included. Thank you to the OpenRazer contributors.', 'mice': mice}
 
 
 if __name__ == '__main__':

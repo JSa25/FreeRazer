@@ -1,6 +1,7 @@
 {
  "version": 20261110,
  "source": "openrazer",
+ "credit": "Device facts from OpenRazer (https://github.com/openrazer/openrazer, GPL-2.0); no OpenRazer code is included. Thank you to the OpenRazer contributors.",
  "mice": [
   {
    "pid": 19,

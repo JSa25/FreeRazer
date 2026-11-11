@@ -876,6 +876,8 @@ class App(tk.Tk):
         ttk.Label(pg, text='About', style='H2.TLabel').pack(anchor='w', pady=(32, 4))
         self.about_lbl = ttk.Label(pg, style='Muted.TLabel')
         self.about_lbl.pack(anchor='w')
+        ttk.Label(pg, text='Mouse data thanks to the OpenRazer project (github.com/openrazer/openrazer). '
+                           'Not affiliated with Razer or OpenRazer.', style='Muted.TLabel').pack(anchor='w', pady=(4, 0))
         row = ttk.Frame(pg)
         row.pack(anchor='w', pady=(12, 0))
         ttk.Button(row, text='Open error log', command=self.open_log).pack(side='left')
