@@ -66,6 +66,7 @@ def put_back():
                                       set_lighting=lambda e, rgb: sent.append(('light', e, rgb)),
                                       set_brightness=lambda v: sent.append(('bright', v)))
     app.cfg['keep'] = {da['name']: {'light': ['static', [255, 0, 0]], 'bright': 33}}
+    app.model, app.editable = da, app.editable_for(da)  # the put-back only runs for the mouse the window shows
     info = ((50, False), (800, 800), 1000, da, (5, 5), ('other', (0, 0, 0), 20))
     fixed = app.keep_settings(info)
     check(f'Synapse lighting put back {fixed} {sent}',

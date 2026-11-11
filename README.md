@@ -219,9 +219,7 @@ Names and USB product IDs from [OpenRazer](https://github.com/openrazer/openraze
 
 </details>
 
-The app only reads and sets button bindings, DPI, polling rate, power saving (sleep timer, low power level) and, on mice where it has been tested (so far the DeathAdder V2 Pro), lighting; it never touches firmware.
-
-Want your mouse supported? See [Adding a mouse](#adding-a-mouse).
+The app only reads and sets button bindings, DPI, polling rate, power saving (sleep timer, low power level) and lighting; it never touches firmware. What it may change on each mouse comes from its mouse database, see [How mice are supported](#how-mice-are-supported).
 
 ## Features
 
@@ -290,24 +288,33 @@ powershell -ExecutionPolicy Bypass -File release.ps1 -Notes "What changed"
 
 Installed copies check GitHub Releases at most once a day (or when you click Check for updates in Settings or the tray menu) and ask before updating; the pop-up never appears while a linked game is in focus. On Update now they download `FreeRazerSetup.exe`, check it against the published `.sha256`, and install it silently.
 
+## How mice are supported
+
+**Settings (DPI, polling rate, power saving, lighting)** come from the mouse database, `devices.json`, which `tools/gen_devices.py` builds from [OpenRazer](https://github.com/openrazer/openrazer)'s driver. A mouse gets a setting only where OpenRazer's driver sends it the same command FreeRazer sends, with the transaction ID the driver uses for it. Settings > Update mouse database downloads the newest `devices.json` from this repo, so new mice work without a new version. The file is checked in full before it is used.
+
+**Buttons** aren't in OpenRazer, so they're checked on the mouse itself. When a mouse connects, FreeRazer reads its usual buttons (right click, scroll click and up/down, the two side buttons). Each one that answers with its own factory action is a real button and can be remapped from then on. One that answers with anything else (already remapped in Synapse, say) stays as it is; resetting the mouse to factory settings in Synapse unlocks it. Button IDs that aren't real buttons answer with leftover memory, which never spells out a factory action, so nothing is ever written to them.
+
+The Viper V4 Pro and DeathAdder V2 Pro were also tested by hand here and have their own entries in `DEVICES` in `razer_switch.py`.
+
 ## Adding a mouse
 
-You need the mouse, and only a few minutes. Nothing is written to the mouse.
+Only needed for a mouse that isn't in the mouse database, or for buttons beyond the usual ones (a Naga's side grid, say). You need the mouse and a few minutes. Nothing is written to the mouse.
 
 1. Close Razer Synapse.
 2. Run `py -3.13 razer_switch.py probe` and wait for it to finish (it reads about 130 values).
 3. Open an issue titled "Add <your mouse name>" and paste the whole report. Also list the physical buttons your mouse has (for example: 2 side buttons, DPI button on top) and, if you know them, what each does at factory settings.
 
-What the report contains: the USB product IDs of your Razer devices, which transaction ID the mouse answers to, and what the mouse returns for button IDs 1 to 127. Some IDs that aren't real buttons return leftover memory, which is why a report alone isn't enough and an owner has to confirm.
+What the report contains: the USB product IDs of your Razer devices, which transaction ID the mouse answers to, and what the mouse returns for button IDs 1 to 127.
 
-From that, a new entry goes into `DEVICES` with `'verified': False`. The owner then tries one change on a test build (set a side button to a key, check it, reset it), and the entry is marked verified.
-
-A device entry looks like this:
+From that, a new entry goes into `DEVICES`. Extra buttons show under the picture as More buttons. A hand-made entry looks like this:
 
 ```python
 {'name': 'Viper V4 Pro', 'pids': (0x00E6,), 'txn': 0x1F, 'verified': True, 'drawing': 'viper-v4-pro',
+ 'features': {'battery', 'dpi', 'stages', 'poll', 'sleep', 'low_power'},
  'buttons': {1: ('Left Click', 'mouse:left'), 2: ('Right Click', 'mouse:right'), ...}}
 ```
+
+To rebuild the database from a newer OpenRazer: `py -3.13 tools/gen_devices.py razermouse_driver.c razermouse_driver.h mouse.py` (the first two from `openrazer/driver/`, the third from `openrazer/daemon/openrazer_daemon/hardware/`), then commit `devices.json`.
 
 Mice without their own drawing get a generic one (`'drawing': 'generic'`).
 

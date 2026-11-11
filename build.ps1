@@ -18,7 +18,8 @@ $exclude = 'numpy PIL._avif PIL._webp PIL._imagingcms PIL.ImageCms PIL.AvifImage
            'multiprocessing asyncio'
 $excludeArgs = $exclude.Split(' ') | ForEach-Object { '--exclude-module', $_ }
 $icon = Join-Path $PSScriptRoot 'icon.ico'  # absolute: PyInstaller resolves relative paths from --specpath
-py -3.13 -m PyInstaller --onefile --windowed --name 'FreeRazer' --icon $icon --add-data "$icon;." `
+$db = Join-Path $PSScriptRoot 'devices.json'  # the mouse database the exe starts with
+py -3.13 -m PyInstaller --onefile --windowed --name 'FreeRazer' --icon $icon --add-data "$icon;." --add-data "$db;." `
     --paths $PSScriptRoot --hidden-import razer_switch --hidden-import pystray._win32 @excludeArgs `
     --distpath dist --workpath build --specpath build --noconfirm --clean freerazer.pyw
 if ($LASTEXITCODE) { throw 'PyInstaller failed' }

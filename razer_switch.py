@@ -21,11 +21,15 @@ import hid
 VID = 0x1532  # Razer
 PROFILE = 0x01  # the only profile slot web Synapse wrote to
 
-# One entry per model. Only 'verified' entries are ever written to, and only on the button IDs listed:
-# on the V4 Pro, IDs outside these answer with leftover memory, so a wrong ID could write into it.
+# Mice tested here, by hand. Every other mouse comes from the mouse database (devices.json, built from
+# OpenRazer by tools/gen_devices.py): it gets the features OpenRazer sends the same commands for, and only the
+# buttons that read back as their factory action on the mouse itself (see Mouse.confirm_buttons). Button IDs
+# outside these answer with leftover memory on the V4 Pro, so a wrong ID could write into it.
+ALL_FEATURES = ('battery', 'dpi', 'stages', 'poll', 'sleep', 'low_power', 'light')
 DEVICES = [
     {'name': 'Viper V4 Pro', 'pids': (0x00E6,),  # dongle and cable report the same PID
      'txn': 0x1F, 'verified': True, 'drawing': 'viper-v4-pro', 'low_power_max': 100,
+     'features': {'battery', 'dpi', 'stages', 'poll', 'sleep', 'low_power'},
      'buttons': {  # id: (label as Synapse names it, factory action)
          1: ('Left Click', 'mouse:left'),
          2: ('Right Click', 'mouse:right'),
@@ -39,7 +43,8 @@ DEVICES = [
     # tested on the wireless dongle (0x007D); OpenRazer lists 0x007C for the cable, not tested here
     {'name': 'DeathAdder V2 Pro', 'pids': (0x007D,), 'txn': 0x1F, 'verified': True, 'drawing': 'generic',
      'dpi_max': 20000,  # OpenRazer's DPI_MAX for this model
-     'led': 0x04,  # the logo; every effect below tested on this mouse 2026-11-10
+     'leds': [0x04],  # the logo; every effect tested on this mouse 2026-11-10
+     'features': set(ALL_FEATURES),
      'buttons': {
          1: ('Left Click', 'mouse:left'),
          2: ('Right Click', 'mouse:right'),
@@ -54,15 +59,72 @@ DEVICES = [
 TXN_GUESSES = (0x1F, 0x3F, 0xFF, 0x11)
 
 
+COMMON_BUTTONS = (1, 2, 3, 4, 5, 9, 10)
+DB_FILE = 'devices.json'
+DB = {}  # pid -> mouse database entry, see use_db
+# commands the database may give a transaction ID for ('ccii': class, id)
+DB_TXN_KEYS = {'0780', '0784', '0485', '0405', '0486', '0406', '0085', '0005', '00c0', '0040', '0783', '0703',
+               '0781', '0701', '0f02', '0f84', '0f04'}
+DB_LEDS = {0x01, 0x04, 0x05, 0x10, 0x11}  # scroll wheel, logo, backlight, right side, left side
+
+
+def check_db(db):
+    """The mouse database as {pid: entry}, or ValueError. It can come from the internet, so every field is
+    checked; one bad entry rejects the whole file."""
+    if not isinstance(db, dict) or not isinstance(db.get('version'), int) or not isinstance(db.get('mice'), list):
+        raise ValueError('not a FreeRazer mouse database')
+    out = {}
+    is_int = lambda v, lo, hi: isinstance(v, int) and not isinstance(v, bool) and lo <= v <= hi
+    for e in db['mice']:
+        ok = (isinstance(e, dict) and is_int(e.get('pid'), 1, 0xFFFF) and isinstance(e.get('name'), str)
+              and 0 < len(e['name']) <= 80 and set(e) <= {'pid', 'name', 'dpi_max', 'dpi_read_store', 'poll',
+              'poll_again_txn', 'leds', 'features', 'txn'}
+              and is_int(e.get('dpi_max', 100), 100, 100000) and e.get('dpi_read_store', 0) in (0, 1)
+              and e.get('poll', 'classic') in ('classic', 'v2') and is_int(e.get('poll_again_txn', 0), 0, 255)
+              and isinstance(e.get('leds', []), list) and set(e.get('leds', [])) <= DB_LEDS
+              and isinstance(e.get('features', []), list) and set(e.get('features', [])) <= set(ALL_FEATURES)
+              and isinstance(e.get('txn', {}), dict) and set(e.get('txn', {})) <= DB_TXN_KEYS
+              and all(is_int(t, 0, 255) for t in e.get('txn', {}).values()))
+        if not ok:
+            raise ValueError(f'bad mouse database entry: {str(e)[:80]}')
+        out[e['pid']] = e
+    return out
+
+
+def use_db(db):
+    global DB
+    DB = check_db(db)
+
+
+def db_model(e):
+    """A model built from a mouse database entry. Buttons: the ones nearly every mouse has; which of them can be
+    changed is decided on the mouse itself (Mouse.confirm_buttons)."""
+    common = {b: v for b, v in DEVICES[0]['buttons'].items() if b in COMMON_BUTTONS}
+    m = {'name': e['name'].removeprefix('Razer '), 'pids': (e['pid'],), 'txn': None, 'verified': False,
+         'drawing': 'generic', 'buttons': common, 'features': set(e.get('features', [])),
+         'cmd_txn': {k: v for k, v in e.get('txn', {}).items()}, 'leds': list(e.get('leds', []))}
+    for key in ('dpi_max', 'dpi_read_store', 'poll', 'poll_again_txn'):
+        if key in e:
+            m[key] = e[key]
+    if m.get('poll') == 'v2':
+        m['poll_args'] = 0  # OpenRazer reads 00/C0 and sets 00/40 with 00 first (the V4 Pro, by Synapse: 01)
+    return m
+
+
 def unknown_model(pid, name=''):
-    """A Razer mouse not in DEVICES: read-only, showing the buttons every mouse has."""
-    common = {b: v for b, v in DEVICES[0]['buttons'].items() if b in (1, 2, 3, 4, 5, 9, 10)}
+    """A Razer mouse with no data: no features, only buttons confirmed on the mouse can change."""
+    common = {b: v for b, v in DEVICES[0]['buttons'].items() if b in COMMON_BUTTONS}
     return {'name': name or f'Razer mouse {pid:#06x}', 'pids': (pid,), 'txn': None, 'verified': False,
-            'drawing': 'generic', 'buttons': common}
+            'drawing': 'generic', 'buttons': common, 'features': set()}
 
 
 def model_for(pid, name=''):
-    return next((d for d in DEVICES if pid in d['pids']), None) or unknown_model(pid, name)
+    return (next((d for d in DEVICES if pid in d['pids']), None) or (db_model(DB[pid]) if pid in DB else None)
+            or unknown_model(pid, name))
+
+
+def has(model, feature):
+    return feature in model.get('features', ())
 
 
 def editable(model):
@@ -75,7 +137,7 @@ def mice():
     infos = hid.enumerate(VID)
     # a PID with a mouse interface (usage page 1, usage 2); skips Razer keyboards and headsets
     pids = {i['product_id'] for i in infos if (i['usage_page'], i['usage']) == (1, 2)}
-    pids |= {p for d in DEVICES for p in d['pids']}
+    pids |= {p for d in DEVICES for p in d['pids']} | set(DB)
     infos = [i for i in infos if i['product_id'] in pids]
     return sorted(infos, key=lambda i: model_for(i['product_id'])['txn'] is None)
 
@@ -167,8 +229,9 @@ POLL_HZ = {0x40: 125, 0x10: 500, 0x08: 1000, 0x04: 2000, 0x02: 4000, 0x01: 8000}
 # older mice (DeathAdder V2 Pro) refuse 00/C0 and use 00/85 to read, 00/05 to set; codes as in OpenRazer, tested
 POLL_HZ_CLASSIC = {0x08: 125, 0x02: 500, 0x01: 1000}
 DPI_RANGE = (100, 50000)  # the range web Synapse offers for the V4 Pro
-# besides button sets (02/0C), the only writes allowed, and only on verified models
-SETTING_WRITES = {b'\x00\x40', b'\x00\x05', b'\x04\x06', b'\x07\x03', b'\x07\x01', b'\x0f\x02', b'\x0f\x04'}
+# besides button sets (02/0C), the only writes allowed, each only on a model with that feature
+SETTING_WRITES = {b'\x00\x40': 'poll', b'\x00\x05': 'poll', b'\x04\x06': 'stages', b'\x04\x05': 'dpi',
+                  b'\x07\x03': 'sleep', b'\x07\x01': 'low_power', b'\x0f\x02': 'light', b'\x0f\x04': 'light'}
 # lighting (OpenRazer's extended matrix): 0F/02 sets the effect, 0F/04 the brightness; 0F/82 and 0F/84 read them
 LIGHT_EFFECTS = {'off': 0x00, 'static': 0x01, 'breathing': 0x02, 'spectrum': 0x03}
 # sleep when idle: 07/83 read, 07/03 set, seconds as 2 bytes (OpenRazer: 60-900; Synapse: 1-15 min)
@@ -272,7 +335,31 @@ class Mouse:
         self.dev, self.model, self.txn = None, None, None
         self.poll_table = None  # POLL_HZ or POLL_HZ_CLASSIC, whichever this mouse answered to
         self.pid = None  # the mouse picked in the app when several are plugged in; None = the first found
+        self.confirmed = {}  # model name: buttons of a mouse not tested here that read back as their factory action
         self.lock = threading.RLock()  # the app reads battery/DPI on a background thread while writes happen on the main one
+
+    def writable(self):
+        """Buttons that may be changed: all but left click on a mouse tested here, else the confirmed ones."""
+        ids = editable(self.model)
+        return set(ids) if self.model['verified'] else self.confirmed.get(self.model['name'], set()) & set(ids)
+
+    def confirm_buttons(self):
+        """Which common buttons read back as their factory action. A real button does; an ID that isn't one
+        answers with leftover memory, which won't spell out exactly this. A button already changed (by FreeRazer
+        or Synapse) won't match either, which is why the app remembers what was confirmed. Reads only."""
+        self.connect()
+        known = self.confirmed.get(self.model['name'], set())
+        return {b for b in editable(self.model) if b in COMMON_BUTTONS and b not in known
+                and self._try(lambda b=b: self.get_action(b)) == self.model['buttons'][b][1]} | known
+
+    def _try(self, read):
+        """A read, or None if the mouse refuses that command."""
+        try:
+            return read()
+        except OSError as e:
+            if 'rejected' not in str(e):  # unplugged or asleep, not refused
+                raise
+            return None
 
     def choose(self, pid):
         """Talk to this mouse from now on (it is opened on the next call)."""
@@ -293,6 +380,8 @@ class Mouse:
             found = [i for i in found if i['product_id'] == self.pid]
         for info in found:
             model = model_for(info['product_id'], info['product_string'])
+            # shortcut: a mouse that answers no button read with any of these isn't opened at all, even if the
+            # database has other features for it; add a fallback read if such a mouse turns up
             for txn in (model['txn'],) if model['txn'] else TXN_GUESSES:
                 d = hid.device()
                 try:
@@ -305,15 +394,20 @@ class Mouse:
                 d.close()
         raise OSError('no Razer mouse found (is it plugged in and Synapse closed?)')
 
-    def call(self, pkt):
+    def call(self, pkt, txn=None):
+        """Send one command. txn: a transaction ID for this packet only; otherwise the one the mouse database
+        gives for this command, otherwise the mouse's own (the checksum doesn't cover that byte)."""
         with self.lock:
             try:
                 self._connect()
-                # the one place packets go out: anything but a read must be a button set on a verified model
-                if not pkt[7] & 0x80 and not (self.model['verified'] and (
-                        (pkt[6:8] == b'\x02\x0c' and pkt[9] in editable(self.model)) or
-                        (bytes(pkt[6:8]) in SETTING_WRITES and (pkt[6] != 0x0F or pkt[9] == self.model.get('led'))))):
+                key = bytes(pkt[6:8])
+                # the one place packets go out: anything but a read must be an allowed button or setting
+                if not pkt[7] & 0x80 and not ((key == b'\x02\x0c' and pkt[9] in self.writable()) or (
+                        key in SETTING_WRITES and has(self.model, SETTING_WRITES[key])
+                        and (pkt[6] != 0x0F or pkt[9] in self.model.get('leds', ())))):
                     raise ValueError(f'refusing to send command {pkt[6]:02x}/{pkt[7]:02x} to {self.model["name"]}')
+                pkt = bytearray(pkt)
+                pkt[1] = txn if txn is not None else self.model.get('cmd_txn', {}).get(key.hex(), self.txn)
                 r = transact(self.dev, pkt)
             except OSError:
                 if self.dev:
@@ -331,10 +425,7 @@ class Mouse:
 
     def set_action(self, button, action):
         self.connect()
-        if not self.model['verified']:
-            raise OSError(f'{self.model["name"]} is not supported for changes yet (read-only); '
-                          'run "probe" and open an issue to add it')
-        if button not in editable(self.model):
+        if button not in self.writable():
             raise ValueError(f'button {button} cannot be changed on {self.model["name"]}')
         self.call(set_packet(button, action, self.txn))
 
@@ -342,23 +433,24 @@ class Mouse:
         for b, action in binding.items():
             self.set_action(b, action)
 
-    def read(self, cls, cmd, args=()):
-        """Args part of the answer to a read-only query (command id has the 0x80 bit set)."""
+    def read(self, cls, cmd, args=(), size=0x0A):
+        """Args part of the answer to a read-only query (command id has the 0x80 bit set). `size` is OpenRazer's
+        data size for the command; the mice tested here were read with 0x0A, so they keep it."""
         self.connect()
-        return self.call(packet(cls, cmd, list(args), self.txn))[8:24]
+        return self.call(packet(cls, cmd, list(args), self.txn, size=0x0A if self.model['verified'] else size))[8:24]
 
     def battery(self):
-        """(percent, charging). Read on the V4 Pro: 07/80 byte 1 is the level out of 255, 07/84 byte 1 is charging."""
-        level = self.read(0x07, 0x80)[1]
-        return round(level * 100 / 255), bool(self.read(0x07, 0x84)[1])
+        """(percent, charging), or None for a mouse without a battery. Read on the V4 Pro: 07/80 byte 1 is the
+        level out of 255, 07/84 byte 1 is charging."""
+        level = self._try(lambda: self.read(0x07, 0x80, size=0x02)[1])
+        if level is None:
+            return None
+        return round(level * 100 / 255), bool(self._try(lambda: self.read(0x07, 0x84, size=0x02)[1]))
 
     def power(self):
         """(sleep after idle in minutes, low power mode below this battery %), or None if the mouse refuses."""
-        try:
-            a, b = self.read(0x07, 0x83), self.read(0x07, 0x81)
-        except OSError as e:
-            if 'rejected' not in str(e):
-                raise
+        a, b = self._try(lambda: self.read(0x07, 0x83, size=0x02)), self._try(lambda: self.read(0x07, 0x81, size=0x01))
+        if a is None or b is None:
             return None
         return round((a[0] << 8 | a[1]) / 60), byte_to_percent(b[0])
 
@@ -377,9 +469,11 @@ class Mouse:
         self.call(packet(0x07, 0x01, [percent_to_byte(int(percent))], self.txn, size=0x01))
 
     def dpi(self):
-        """Current (x, y) DPI. Read on the V4 Pro: 04/85 with storage 01 answers 01, x hi/lo, y hi/lo."""
-        a = self.read(0x04, 0x85, [0x01])
-        return a[1] << 8 | a[2], a[3] << 8 | a[4]
+        """Current (x, y) DPI, or None if refused. Read on the V4 Pro: 04/85 with storage 01 answers 01, x hi/lo,
+        y hi/lo; OpenRazer reads most mice with storage 00 (the mouse database says which)."""
+        self.connect()
+        a = self._try(lambda: self.read(0x04, 0x85, [self.model.get('dpi_read_store', 1)], size=0x07))
+        return None if a is None else (a[1] << 8 | a[2], a[3] << 8 | a[4])
 
     def dpi_stages(self):
         """(active stage number from 1, [(x, y), ...]). 04/86 answers storage, active, count, then 7 bytes per
@@ -388,19 +482,23 @@ class Mouse:
         return parse_stages(self.call(packet(0x04, 0x86, [0x01], self.txn, size=0x26))[8:8 + 0x26])
 
     def polling(self):
-        """Polling rate in Hz, or None for a code we haven't seen. A change shows up ~0.3 s after it is set.
-        Newer mice answer 00/C0 (the V4 Pro rejects 00/85); older ones reject 00/C0 and answer 00/85."""
-        if self.poll_table is not POLL_HZ_CLASSIC:
-            try:
-                code = self.read(0x00, 0xC0, [0x01])[1]
+        """Polling rate in Hz, or None for a code we haven't seen or a mouse that refuses. A change shows up
+        ~0.3 s after it is set. Newer mice answer 00/C0 (the V4 Pro rejects 00/85); older ones reject 00/C0 and
+        answer 00/85. The mouse database says which; otherwise the newer one is tried first."""
+        self.connect()
+        kind = self.model.get('poll')
+        if kind != 'classic' and self.poll_table is not POLL_HZ_CLASSIC:
+            a = self._try(lambda: self.read(0x00, 0xC0, [self.model.get('poll_args', 1)], size=0x01))
+            if a is not None:
                 self.poll_table = POLL_HZ
-                return POLL_HZ.get(code)
-            except OSError as e:
-                if 'rejected' not in str(e):  # unplugged, not refused
-                    raise
-        code = self.read(0x00, 0x85)[0]
+                return POLL_HZ.get(a[1])
+            if kind == 'v2':
+                return None
+        a = self._try(lambda: self.read(0x00, 0x85, size=0x01))
+        if a is None:
+            return None
         self.poll_table = POLL_HZ_CLASSIC
-        return POLL_HZ_CLASSIC.get(code)
+        return POLL_HZ_CLASSIC.get(a[0])
 
     def polling_rates(self):
         """The rates this mouse can be set to (the newer set until the first polling read)."""
@@ -410,55 +508,68 @@ class Mouse:
         self.connect()
         if self.poll_table is None:
             self.polling()
-        code = {v: k for k, v in self.poll_table.items()}.get(hz)
+        code = {v: k for k, v in (self.poll_table or {}).items()}.get(hz)
         if code is None:
             raise ValueError(f'{hz} Hz is not one of {self.polling_rates()}')
         if self.poll_table is POLL_HZ:
-            self.call(packet(0x00, 0x40, [0x01, code], self.txn, size=0x02))
+            self.call(packet(0x00, 0x40, [self.model.get('poll_args', 1), code], self.txn, size=0x02))
+            if 'poll_again_txn' in self.model:  # OpenRazer sends these mice the set a second time, with 01
+                self.call(packet(0x00, 0x40, [0x01, code], self.txn, size=0x02), txn=self.model['poll_again_txn'])
         else:
             self.call(packet(0x00, 0x05, [code], self.txn, size=0x01))
 
     def set_dpi(self, dpi):
         """One DPI for both axes. With one stage this is what web Synapse sends; with several (the DPI button
-        cycles through them) only the active stage changes and the others stay as they are."""
+        cycles through them) only the active stage changes and the others stay as they are. A mouse without
+        stages gets 04/05, as OpenRazer sends it."""
         self.connect()
         lo, hi = dpi_range(self.model)
         if not lo <= int(dpi) <= hi:
             raise ValueError(f'DPI must be {lo} to {hi}')
+        d = int(dpi)
+        if not has(self.model, 'stages'):
+            return self.call(packet(0x04, 0x05, [0x01, d >> 8, d & 0xFF, d >> 8, d & 0xFF, 0, 0], self.txn, size=0x07))
         active, stages = self.dpi_stages()
         if not 1 <= active <= len(stages):  # unreadable table: fall back to a single stage
             active, stages = 1, [(0, 0)]
-        stages[active - 1] = (int(dpi), int(dpi))
+        stages[active - 1] = (d, d)
         self.call(stages_packet(active, stages, self.txn))
 
     def lighting(self):
-        """(effect name, (r, g, b), brightness %) of the model's LED, or None if it has none we know.
-        0F/82 answers storage, led, effect, 2 effect bytes, colour count, r, g, b."""
+        """(effect name, (r, g, b), brightness %) of the model's first LED, or None if it has none we know.
+        0F/82 answers storage, led, effect, 2 effect bytes, colour count, r, g, b. That read isn't in OpenRazer
+        (it worked on the DeathAdder V2 Pro); a mouse that refuses it shows no effect picked."""
         self.connect()
-        led = self.model.get('led')
-        if led is None:
+        leds = self.model.get('leds')
+        if not leds:
             return None
-        a = self.call(packet(0x0F, 0x82, [0x01, led], self.txn, size=0x0C))[8:]
-        b = self.call(packet(0x0F, 0x84, [0x01, led], self.txn, size=0x03))[8:]
+        b = self._try(lambda: self.call(packet(0x0F, 0x84, [0x01, leds[0]], self.txn, size=0x03))[8:])
+        if b is None:
+            return None
+        a = self._try(lambda: self.call(packet(0x0F, 0x82, [0x01, leds[0]], self.txn, size=0x0C),
+                                        txn=self.model.get('cmd_txn', {}).get('0f02'))[8:])
+        if a is None:
+            return 'other', (0, 0, 0), byte_to_percent(b[2])
         effect = {v: k for k, v in LIGHT_EFFECTS.items()}.get(a[2], 'other')  # e.g. Synapse's own custom frames
         return effect, tuple(a[6:9]), byte_to_percent(b[2])
 
     def set_lighting(self, effect, rgb=(0, 255, 0)):
+        """The same effect on every LED the model has."""
         self.connect()
-        led = self.model.get('led')
-        if led is None or effect not in LIGHT_EFFECTS:
+        if not self.model.get('leds') or effect not in LIGHT_EFFECTS:
             raise ValueError(f'{self.model["name"]} has no {effect} lighting')
-        args = [0x01, led, LIGHT_EFFECTS[effect]]
-        if effect in ('static', 'breathing'):  # breathing's 1 = one colour
-            args += [0, 0, 1, *rgb] if effect == 'static' else [1, 0, 1, *rgb]
-        self.call(packet(0x0F, 0x02, args, self.txn, size=max(len(args), 6)))  # OpenRazer's sizes: 6 or 9
+        for led in self.model['leds']:
+            args = [0x01, led, LIGHT_EFFECTS[effect]]
+            if effect in ('static', 'breathing'):  # breathing's 1 = one colour
+                args += [0, 0, 1, *rgb] if effect == 'static' else [1, 0, 1, *rgb]
+            self.call(packet(0x0F, 0x02, args, self.txn, size=max(len(args), 6)))  # OpenRazer's sizes: 6 or 9
 
     def set_brightness(self, percent):
         self.connect()
-        led = self.model.get('led')
-        if led is None or not 0 <= int(percent) <= 100:
+        if not self.model.get('leds') or not 0 <= int(percent) <= 100:
             raise ValueError('brightness must be 0 to 100%')
-        self.call(packet(0x0F, 0x04, [0x01, led, percent_to_byte(int(percent))], self.txn, size=0x03))
+        for led in self.model['leds']:
+            self.call(packet(0x0F, 0x04, [0x01, led, percent_to_byte(int(percent))], self.txn, size=0x03))
 
 
 def describe(binding, model=DEVICES[0]):
@@ -492,6 +603,29 @@ def profiles_path(legacy_dir=None):
             with open(path, 'w', encoding='utf-8') as f:
                 json.dump({'default': {}, 'profiles': {}, 'links': {}}, f, indent=2)
     return path
+
+
+def db_paths():
+    """(database shipped with the app, database downloaded with Update mouse database)."""
+    shipped = os.path.join(getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__))), DB_FILE)
+    return shipped, os.path.join(os.path.dirname(profiles_path()), DB_FILE)
+
+
+def load_db():
+    """Use the newest valid mouse database of the two; returns it (None if neither is usable)."""
+    best = None
+    for path in db_paths():
+        try:
+            with open(path, encoding='utf-8') as f:
+                db = json.load(f)
+            check_db(db)
+        except (OSError, ValueError):  # missing, or not valid: the other one is used
+            continue
+        if best is None or db['version'] > best['version']:
+            best = db
+    if best:
+        use_db(best)
+    return best
 
 
 def load_profiles(model=DEVICES[0]):
@@ -609,6 +743,7 @@ class _FakeDev:
     def __init__(self, refuse=()):
         self.sent, self.refuse = [], set(refuse)  # refuse: (class, command) pairs answered with status 05
         self.stray = 0  # how many of the next answers belong to another program's command
+        self.actions = {}  # button: (action type, payload) for button reads to answer with
 
     def send_feature_report(self, data):
         self.sent.append(bytes(data[1:]))
@@ -618,6 +753,10 @@ class _FakeDev:
         if self.stray:  # an answer to someone else's command, like Synapse's lighting frames
             self.stray -= 1
             return b'\x00\x02' + bytes(4) + b'\x08\x0f\x03' + bytes(82)
+        if (last[6], last[7]) == (0x02, 0x8C) and last[9] in self.actions:
+            kind, payload = self.actions[last[9]]
+            args = bytes([last[8], last[9], 0, kind, len(payload), *payload])
+            return b'\x00\x02' + last[1:8] + args + bytes(82 - len(args))
         refused = (last[6], last[7]) in self.refuse
         # status, then the command header echoed back (as the mouse does), arguments zero
         return b'\x00' + (b'\x05' if refused else b'\x02') + last[1:8] + bytes(82)
@@ -689,8 +828,8 @@ def test():
     m.model = other
     try:
         m.set_action(5, 'f7')
-        raise AssertionError('unverified model was written')
-    except OSError:
+        raise AssertionError('a button not confirmed on the mouse was written')
+    except ValueError:
         pass
     m.get_action(5)  # reads still work read-only
     assert all(p[7] & 0x80 for p in m.dev.sent[-1:])
@@ -761,6 +900,51 @@ def test():
     m.model = v4
     assert m.lighting() is None
 
+    # mouse database: a mouse from OpenRazer gets only its listed features, with OpenRazer's transaction IDs
+    def refused(*writes):
+        for w in writes:
+            n = len(m.dev.sent)
+            try:
+                w()
+                raise AssertionError('write was allowed')
+            except ValueError:
+                assert len(m.dev.sent) == n, 'sent before refusing'
+    entry = {'pid': 0x0BEE, 'name': 'Razer Test Mouse', 'dpi_max': 16000, 'dpi_read_store': 0, 'poll': 'v2',
+             'poll_again_txn': 0xFF, 'leds': [1], 'features': ['dpi', 'poll', 'light'],
+             'txn': {'0405': 0x3F, '0040': 0x1F, '0f02': 0x3F}}
+    use_db({'version': 1, 'mice': [entry]})
+    t = model_for(0x0BEE)
+    assert not t['verified'] and t['name'] == 'Test Mouse' and has(t, 'dpi') and not has(t, 'sleep')
+    m.model, m.txn, m.dev, m.poll_table, m.confirmed = t, 0x11, _FakeDev(), None, {}
+    m.set_dpi(800)  # no DPI stages listed: 04/05, as OpenRazer sends it
+    assert m.dev.sent[-1][1] == 0x3F and m.dev.sent[-1][5:15].hex(' ') == '07 04 05 01 03 20 03 20 00 00'
+    m.set_polling(500)  # OpenRazer: 00 first, then 01 with the second transaction ID
+    assert [(p[1], p[8]) for p in m.dev.sent[-2:]] == [(0x1F, 0), (0xFF, 1)] and m.dev.sent[-1][9] == 0x10
+    m.set_lighting('spectrum')
+    assert m.dev.sent[-1][1] == 0x3F and m.dev.sent[-1][8:11].hex(' ') == '01 01 03'
+    m.get_action(4)
+    assert m.dev.sent[-1][1] == 0x11  # no database ID for buttons: the one the mouse answered on connect
+    refused(lambda: m.set_sleep(5), lambda: m.set_action(4, 'f5'), lambda: m.call(packet(0x0F, 0x02, [1, 4, 0], 0x1F)))
+    # buttons unlock when they read back as their factory action; a changed or odd answer doesn't
+    m.dev = _FakeDev()
+    m.dev.actions = {2: encode('mouse:right'), 4: encode('mouse:back'), 5: encode('f5'), 9: (0x09, [1])}
+    assert m.confirm_buttons() == {2, 4}
+    m.confirmed = {'Test Mouse': {2, 4}, 'Other Mouse': {5}}  # another model's confirmations don't count here
+    m.set_action(4, 'f5')
+    refused(lambda: m.set_action(5, 'f5'), lambda: m.set_action(9, 'f5'))
+    for bad in ({**entry, 'txn': {'020c': 1}}, {**entry, 'leds': [0x20]}, {**entry, 'extra': 1}, {**entry, 'pid': -1},
+                {**entry, 'features': ['firmware']}):
+        try:
+            check_db({'version': 1, 'mice': [bad]})
+            raise AssertionError(f'bad database entry accepted: {bad}')
+        except ValueError:
+            pass
+    shipped = db_paths()[0]
+    if os.path.exists(shipped):
+        with open(shipped, encoding='utf-8') as f:
+            assert len(check_db(json.load(f))) > 100
+    use_db({'version': 0, 'mice': []})
+
     # profiles move to %APPDATA%: copied once from the old folder, never overwritten afterwards
     import tempfile
     saved = os.environ.get('APPDATA')
@@ -787,6 +971,8 @@ def test():
 
 if __name__ == '__main__':
     cmd = sys.argv[1] if len(sys.argv) > 1 else ''
+    if cmd != 'test':
+        load_db()
     if cmd == 'apply' and len(sys.argv) > 2:
         apply(sys.argv[2])
     else:

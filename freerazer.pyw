@@ -93,6 +93,7 @@ def leader(b):
 APP_VERSION = '1.0.0'  # build.ps1 reads this; bump it for every release
 UPDATE_REPO = 'JSa25/freerazer'  # GitHub repo whose Releases carry the installer
 SETUP_ASSET = 'FreeRazerSetup.exe'  # release asset, plus SETUP_ASSET + '.sha256'
+DB_URL = f'https://raw.githubusercontent.com/{UPDATE_REPO}/master/{rs.DB_FILE}'  # the mouse database, kept in the repo
 NO_WINDOW = 0x08000000  # CREATE_NO_WINDOW: helper programs run without flashing a console
 
 
@@ -450,14 +451,21 @@ class App(tk.Tk):
         self.cfg.pop('picture', None)  # left over from the removed own-picture option
         self.cfg.setdefault('profiles', {})
         self.cfg.setdefault('links', {})  # game exe name -> profile
+        try:
+            self.db = rs.load_db()  # the mouse database: shipped one or a newer downloaded one
+        except Exception:  # never stop the app over it; mice without data are still read
+            log_error('mouse database could not be loaded')
+            self.db = None
         self.mouse = rs.Mouse()
         self.mouse.pid = self.cfg.get('mouse')  # picked in the header when several mice are plugged in
+        # buttons that read back as their factory action, per model; see Mouse.confirm_buttons
+        self.mouse.confirmed = {n: set(ids) for n, ids in self.cfg.get('confirmed', {}).items()}
         self.model = rs.detect(self.mouse.pid) or rs.DEVICES[0]  # V4 Pro layout until a mouse is found
-        self.buttons, self.editable = self.model['buttons'], rs.editable(self.model)
+        self.buttons, self.editable = self.model['buttons'], self.editable_for(self.model)
         migrate_startup()
         self.current, self.sel, self.edit, self.recording = 'default', 5, {}, False
-        if self.sel not in self.editable:
-            self.sel = self.editable[0]
+        if self.sel not in self.buttons or self.sel == 1:
+            self.sel = (self.editable or [b for b in self.buttons if b != 1])[0]
         self._set_icon()
         self.tray, self._told_tray = None, False
         self.protocol('WM_DELETE_WINDOW', self.hide_window)  # X hides to the tray, so auto-switch keeps running
@@ -500,8 +508,15 @@ class App(tk.Tk):
     def own(self, name):
         return self.cfg['default'] if name == 'default' else self.cfg['profiles'][name]
 
+    def editable_for(self, model):
+        """Buttons that can be changed: all but left click on a mouse tested here; on any other mouse, the ones
+        that read back as their factory action (confirmed when it connects)."""
+        ids = rs.editable(model)
+        return ids if model['verified'] else [b for b in ids if b in self.mouse.confirmed.get(model['name'], ())]
+
     def resolved(self, name):
-        return rs.resolve({}, None if name == 'default' else self.cfg["profiles"][name], self.model)
+        full = rs.resolve({}, None if name == 'default' else self.cfg["profiles"][name], self.model)
+        return {b: a for b, a in full.items() if b in self.editable}
 
     def effective(self, b):
         """(action, where it comes from) for button b in the profile being edited."""
@@ -849,6 +864,15 @@ class App(tk.Tk):
         ttk.Button(row, text='Check for updates', command=lambda: self.check_updates(manual=True)).pack(side='left')
         self.update_lbl = ttk.Label(row, style='Muted.TLabel', text=f'Version {APP_VERSION}')
         self.update_lbl.pack(side='left', padx=(12, 0))
+        ttk.Label(pg, text='Mouse database', style='H2.TLabel').pack(anchor='w', pady=(32, 0))
+        ttk.Label(pg, text='Which Razer mice FreeRazer knows the settings of. Updating adds new mice without a new version.',
+                  style='Muted.TLabel').pack(anchor='w', pady=(2, 8))
+        row = ttk.Frame(pg)
+        row.pack(anchor='w')
+        ttk.Button(row, text='Update mouse database', command=self.update_db).pack(side='left')
+        self.db_lbl = ttk.Label(row, style='Muted.TLabel')
+        self.db_lbl.pack(side='left', padx=(12, 0))
+        self.show_db()
         ttk.Label(pg, text='About', style='H2.TLabel').pack(anchor='w', pady=(32, 4))
         self.about_lbl = ttk.Label(pg, style='Muted.TLabel')
         self.about_lbl.pack(anchor='w')
@@ -1584,13 +1608,15 @@ class App(tk.Tk):
 
     def read_mouse(self):
         try:
+            if not self.model['verified']:
+                self.confirm_buttons()
             on_mouse = {b: self.mouse.get_action(b) for b in self.editable}
         except OSError as e:
             self.set_status(f'Mouse not found: {e}')
             return
-        if not self.model['verified']:
-            return self.set_status(f'{self.model["name"]} is read-only until it is added to the device table. '
-                                   f'Run "razer_switch.py probe" and open an issue. Now: {rs.describe(on_mouse, self.model)}')
+        if not self.editable:
+            return self.set_status(f'No button on {self.model["name"]} answered with its factory setting, so buttons '
+                                   'stay as they are. Reset the mouse to factory settings in Razer Synapse to unlock them.')
         matches = [n for n in self.names() if self.resolved(n) == on_mouse]
         if not matches:
             self.set_status(f'The mouse has bindings that are not in any profile: {rs.describe(on_mouse, self.model)}')
@@ -1644,14 +1670,29 @@ class App(tk.Tk):
         self.mouse_btn.configure(text=name + '   ')  # room before the arrow
         self.mouse_pick.pack(side='right', padx=(20, 0), before=self.dev_lbl)
 
+    def confirm_buttons(self):
+        """For a mouse not tested here: unlock the buttons that read back as their factory action, and remember
+        them (a button changed later won't read back as factory again)."""
+        name = self.mouse.model['name'] if self.mouse.model else self.model['name']
+        got = self.mouse.confirm_buttons()
+        if got != self.mouse.confirmed.get(name, set()):
+            self.mouse.confirmed[name] = got
+            self.cfg.setdefault('confirmed', {})[name] = sorted(got)
+            self.write_cfg()
+        if name == self.model['name'] and self.editable != self.editable_for(self.model):
+            self.editable = self.editable_for(self.model)
+            self._draw_mouse()  # clickable labels follow what can be changed
+            self.load_profile(self.current)
+
     def _use_model(self, model):
         """A different mouse: rebuild the picture and button list for it."""
         if model['name'] == self.model['name']:
             return
         self.close_popover()
         self.model = model
-        self.buttons, self.editable = model['buttons'], rs.editable(model)
-        self.sel = self.sel if self.sel in self.editable else self.editable[0]
+        self.buttons, self.editable = model['buttons'], self.editable_for(model)
+        if self.sel not in self.buttons or self.sel == 1:
+            self.sel = (self.editable or [b for b in self.buttons if b != 1])[0]
         self._draw_mouse()
         self.load_profile(self.current)
         w, h = self._min_size  # a mouse with More buttons needs a taller window
@@ -1680,22 +1721,26 @@ class App(tk.Tk):
         """Runs on the background thread while Synapse is open. Tested with Synapse 4: it leaves the mouse alone
         in the background, but showing a mouse in its window writes Synapse's profile onto it. Whatever differs
         from the profile and settings chosen here is written back. Returns what was put back."""
-        if not self.mouse.model['verified']:
+        model = self.mouse.model
+        if model['name'] != self.model['name']:  # the window shows another mouse; nothing here to compare with
             return []
+        has = lambda f: rs.has(model, f)
         fixed = []
         want = self.resolved(self.cfg.get('active', 'default'))
         if any(self.mouse.get_action(b) != a for b, a in want.items()):
             self.mouse.write(want)
             fixed.append('buttons')
-        (_, _), (x, _), hz, _, power, _ = info
-        keep = self.cfg.get('keep', {}).get(self.mouse.model['name'], {})
-        for key, now, label, write in (('dpi', x, 'DPI', self.mouse.set_dpi), ('hz', hz, 'polling rate', self.mouse.set_polling),
-                                       ('sleep', power and power[0], 'sleep time', self.mouse.set_sleep),
-                                       ('low', power and power[1], 'low power level', self.mouse.set_low_power)):
-            if key in keep and now is not None and now != keep[key]:
+        _, dpi, hz, _, power, light = info
+        keep = self.cfg.get('keep', {}).get(model['name'], {})
+        for key, now, label, write in (('dpi', has('dpi') and dpi and dpi[0], 'DPI', self.mouse.set_dpi),
+                                       ('hz', has('poll') and hz, 'polling rate', self.mouse.set_polling),
+                                       ('sleep', has('sleep') and power and power[0], 'sleep time', self.mouse.set_sleep),
+                                       ('low', has('low_power') and power and power[1], 'low power level',
+                                        self.mouse.set_low_power)):
+            if key in keep and now and now != keep[key]:
                 write(keep[key])
                 fixed.append(label)
-        light = info[5]
+        light = light if has('light') else None
         if light and 'light' in keep:
             effect, rgb = keep['light'][0], tuple(keep['light'][1])
             colored = effect in ('static', 'breathing')  # the other effects have no colour to compare
@@ -1741,32 +1786,35 @@ class App(tk.Tk):
                 self.set_status('Mouse disconnected. Profiles still save; they go on the mouse when it is back.')
             self._connected = False
             return
-        (level, charging), (x, y), hz, model, power, light = info
-        self.dev_lbl.configure(text=f'Battery {level}%' + (' · charging' if charging else ''), style='HeadMuted.TLabel')
-        verified = model['verified']
+        battery, dpi, hz, model, power, light = info
+        level = battery and battery[0]
+        self.dev_lbl.configure(text='Connected' if battery is None else
+                               f'Battery {level}%' + (' · charging' if battery[1] else ''), style='HeadMuted.TLabel')
+        has = lambda f: rs.has(model, f)  # what the mouse database (or testing here) says FreeRazer may change
+        x = dpi and dpi[0]
         self.dpi_rng = rs.dpi_range(model)
         self.dpi_box.configure(from_=self.dpi_rng[0], to=self.dpi_rng[1])
         rates = self.mouse.polling_rates()  # older mice stop at 1000 Hz
         for rb in self.poll_btns:
             rb.grid() if int(rb.cget('value')) in rates else rb.grid_remove()
-        for w in (self.dpi_box, *self.poll_btns):
-            w.state(['!disabled'] if verified else ['disabled'])
-        self.dpi_scale.enable(verified)
-        self.perf_note.configure(text='' if verified else f'{model["name"]} is read-only until it is verified.')
-        if self.focus_get() is not self.dpi_box:  # don't overwrite a number being typed
+            rb.state(['!disabled'] if has('poll') and hz else ['disabled'])
+        self.dpi_box.state(['!disabled'] if has('dpi') and x else ['disabled'])
+        self.dpi_scale.enable(bool(has('dpi') and x))
+        self.perf_note.configure(text='' if model.get('features') else
+                                 f'There is no settings data for {model["name"]} yet, so these stay as they are.')
+        if x and self.focus_get() is not self.dpi_box:  # don't overwrite a number being typed
             self.dpi_var.set(str(x))
             self.dpi_scale.set(dpi_to_slider(x, self.dpi_rng))
         self.poll_var.set(hz or 0)
         self._shown = {'dpi': x, 'hz': hz}
         self.power['low'][0].set_range(*rs.low_power_range(model))
         for (key, (sc, _, _)), value in zip(self.power.items(), power or (None, None)):
-            usable = verified and power is not None  # a mouse that refuses these has no power settings to change
-            sc.enable(usable)
+            sc.enable(power is not None and has({'sleep': 'sleep', 'low': 'low_power'}[key]))
             if value is not None:
                 sc.set(value)
                 self.power_sliding(key, value)
                 self._shown[key] = value
-        if light and verified:
+        if light and has('light'):
             effect, rgb, bright = light
             if effect in ('static', 'breathing'):  # other effects read back no colour; keep the last one
                 self._rgb = rgb
@@ -1778,10 +1826,11 @@ class App(tk.Tk):
             self.light_box.pack(anchor='w', before=self.perf_note)
         else:
             self.light_box.pack_forget()
-        self.about_lbl.configure(text=f'{model["name"]}' + ('' if verified else ' (read-only, not verified yet)') +
-                                 f'. Profiles are saved in {os.path.dirname(CFG)}.')
+        self.about_lbl.configure(text=f'{model["name"]}' + ('' if model['verified'] else
+                                 ' (settings from the mouse database)' if model.get('features') else ' (no settings data)')
+                                 + f'. Profiles are saved in {os.path.dirname(CFG)}.')
         if self.tray:
-            self.tray.title = f'FreeRazer · battery {level}%'
+            self.tray.title = 'FreeRazer' if battery is None else f'FreeRazer · battery {level}%'
         if self._connected is False:  # back after being unplugged
             self._use_model(model)
             self._failed = None  # let auto-switch retry a profile that failed while it was away
@@ -1997,6 +2046,47 @@ class App(tk.Tk):
             except (OSError, ValueError) as e:
                 msg = f'Could not change it: {e}'; self._q.put(lambda: self.set_status(msg))
         threading.Thread(target=work, daemon=True).start()
+
+    # ---------- mouse database (devices.json in the repo) ----------
+    def show_db(self):
+        v = str(self.db['version']) if self.db else ''
+        self.db_lbl.configure(text=f'{len(rs.DB)} mice · from {v[:4]}-{v[4:6]}-{v[6:8]}' if self.db else 'Not loaded')
+
+    def update_db(self):
+        """Download the newest mouse database from the repo; it is checked in full before it is used or saved."""
+        import threading
+        self.db_lbl.configure(text='Checking…')
+
+        def work():
+            try:
+                db = json.loads(_curl(DB_URL, timeout=30))
+                rs.check_db(db)
+                if self.db and db['version'] <= self.db['version']:
+                    return self._q.put(lambda: (self.show_db(), self.set_status('The mouse database is up to date.')))
+                path = rs.db_paths()[1]
+                with open(path + '.new', 'w', encoding='utf-8') as f:
+                    json.dump(db, f)
+                os.replace(path + '.new', path)  # a half-written file never replaces a good one
+                self._q.put(lambda: self._db_done(db))
+            except (OSError, ValueError) as e:
+                msg = f'Could not update the mouse database: {e}'
+                self._q.put(lambda: (self.show_db(), self.set_status(msg)))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _db_done(self, db):
+        before = len(rs.DB)
+        rs.use_db(db)
+        self.db = db
+        self.show_db()
+        self.mouse.choose(self.mouse.pid)  # reopened with the new data on the next read
+        new = rs.model_for(self.model['pids'][0], self.model['name'])
+        if new['name'] == self.model['name']:
+            self.model = new  # same mouse, maybe more settings
+        else:
+            self._use_model(new)
+        self.refresh_device(repeat=False)
+        added = len(rs.DB) - before
+        self.set_status('Mouse database updated' + (f': {added} more {"mouse" if added == 1 else "mice"}.' if added > 0 else '.'))
 
     # ---------- updates (GitHub Releases) ----------
     def toggle_auto_update(self):
