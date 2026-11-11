@@ -1369,6 +1369,8 @@ class App(tk.Tk):
     def popup(self, under, items):
         """Rounded drop-down menu under a widget. items: (text, command, enabled[, picked]), or None for a divider.
         Closes on a pick, Esc, or a click anywhere else."""
+        if self._just_closed(under):  # the click on its own button that just closed it
+            return
         k = self.k
         top = tk.Toplevel(self, bg=PANEL, padx=round(4 * k), pady=round(4 * k))
         top.overrideredirect(True)
@@ -1379,7 +1381,7 @@ class App(tk.Tk):
                 continue
             text, cmd, on, picked = (*item, False)[:4]
             b = ttk.Button(top, text=text, style='On.Menu.TButton' if picked else 'Menu.TButton',
-                           command=lambda c=cmd: (top.destroy(), c()))
+                           command=lambda c=cmd: (top.close(), c()))
             b.pack(fill='x')
             b.state(['!disabled'] if on else ['disabled'])
         top.update_idletasks()
@@ -1387,18 +1389,40 @@ class App(tk.Tk):
         x = min(under.winfo_rootx(), self.winfo_rootx() + self.winfo_width() - w)  # stay inside the window
         top.geometry(f'{w}x{top.winfo_reqheight()}+{x}+{under.winfo_rooty() + under.winfo_height() + round(4 * k)}')
         round_corners(top)
+        self._transient(top, under)
 
-        def gone(_=None):
+    def _just_closed(self, opener):
+        """True right after a click closed the pop-up this widget opens: that click shouldn't reopen it."""
+        who, when = getattr(self, '_last_closed', (None, 0))
+        return who is opener and time.monotonic() - when < 0.4
+
+    def _transient(self, top, opener, on_close=None):
+        """A pop-up card or menu closes on Esc, a click anywhere outside it, or switching to another program.
+        Sets top.close() for its own buttons to use."""
+        def close(_=None):
             if not top.winfo_exists():
                 return
+            top.destroy()
+            self.unbind_all('<Button-1>')
+            self._last_closed = (opener, time.monotonic())
+            if on_close:
+                on_close()
+
+        def click(e):
+            if not str(e.widget).startswith(str(top)):
+                close()
+
+        def gone():
             try:
                 f = self.focus_get()
             except KeyError:  # focus in a widget Tk doesn't wrap, such as a combobox list
                 f = None
             if not (f and str(f).startswith(str(top))):
-                top.destroy()
-        top.bind('<Escape>', lambda e: top.destroy())
+                close()
+        top.close = close
+        top.bind('<Escape>', close)
         top.bind('<FocusOut>', lambda e: top.after(1, gone))
+        self.after_idle(lambda: top.winfo_exists() and self.bind_all('<Button-1>', click))  # not the click that opened it
         top.focus_force()
 
     def save(self):
@@ -1790,6 +1814,10 @@ class App(tk.Tk):
         while you drag; the mouse gets it when you let go or press Enter."""
         import colorsys
         from PIL import Image, ImageDraw, ImageTk
+        if getattr(self, '_picker', None) and self._picker.winfo_exists():  # clicking the chip again closes it
+            return self._picker.close()
+        if self._just_closed(self.swatch):
+            return
         k, pad = self.k, round(14 * self.k)
         top = tk.Toplevel(self, bg=BG, padx=pad, pady=pad)
         top.overrideredirect(True)
@@ -1901,20 +1929,8 @@ class App(tk.Tk):
             y = self.swatch.winfo_rooty() - top.winfo_reqheight() - round(6 * k)
         top.geometry(f'+{x}+{y}')
         round_corners(top)
-
-        def gone(_=None):
-            if not top.winfo_exists():
-                return
-            try:
-                f = self.focus_get()
-            except KeyError:
-                f = None
-            if not (f and str(f).startswith(str(top))):
-                top.destroy()
-                self.show_color()
-        top.bind('<Escape>', lambda e: (top.destroy(), self.show_color()))
-        top.bind('<FocusOut>', lambda e: top.after(1, gone))
-        top.focus_force()
+        self._picker = top
+        self._transient(top, self.swatch, self.show_color)
 
     def pick_color(self, rgb):
         self._rgb = tuple(rgb)
