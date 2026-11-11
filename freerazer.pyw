@@ -74,6 +74,7 @@ VK_KEYS = {0x08: 'backspace', 0x09: 'tab', 0x0D: 'enter', 0x14: 'capslock', 0x1B
 
 # button: (label side, label y, line end x relative to centre, line end y) on a 720x340 drawing
 W, H, CX = 720, 340, 360
+EXTRA_ROW = 32  # spacing of the More buttons rows under the picture
 # button: (side, label row y, target x from centre, target y). Rows are evenly spaced and ordered like the
 # targets, so each leader (straight out, then one bend into its button) never crosses another.
 # Side buttons and both clicks sit level with their row, so those leaders are dead straight.
@@ -862,6 +863,7 @@ class App(tk.Tk):
         self.light_box.pack(anchor='w', before=self.perf_note)
         self.update_idletasks()
         w, h = self.winfo_reqwidth(), self.winfo_reqheight()
+        self._min_size = (w, h - round((self.extra_height() - H) * k))  # without any More buttons rows
         self.light_box.pack_forget()
         self.minsize(w, h)
         self.geometry(f'{w}x{h}')  # a set size, so switching pages doesn't resize the window
@@ -920,7 +922,7 @@ class App(tk.Tk):
         gap = round(8 * self.k)
         for _ in range(2):  # Tk reports a smaller size before the card is first shown: place, measure, place again
             pw, ph = max(self.pop.winfo_width(), self.pop.winfo_reqwidth()), max(self.pop.winfo_height(), self.pop.winfo_reqheight())
-            x = cx + (x0 if LABELS[self.sel][0] == 'r' else x1 - pw)
+            x = cx + (x1 - pw if LABELS.get(self.sel, ('r',))[0] == 'l' else x0)
             x = max(0, min(x, page.winfo_width() - pw))
             y = cy + y1 + gap
             if y + ph > page.winfo_height():
@@ -1135,6 +1137,8 @@ class App(tk.Tk):
         if not getattr(self, '_base', None):
             self._base = ImageTk.PhotoImage(self._render(None))
             self.canvas.itemconfigure(self.art_item, image=self._base)
+        if self.sel not in LABELS:  # an extra button has no part of the picture to light up
+            return self.canvas.itemconfigure(self.overlay_item, image='')
         if self.sel not in self._overlays:
             xs, ys = zip(*dict(self.hit)[self.sel], *leader(self.sel))
             k = self.k
@@ -1160,18 +1164,30 @@ class App(tk.Tk):
         self.canvas.configure(cursor='hand2' if over else '')
 
     def _draw_labels(self):
-        """Action text in two columns; their leader lines are part of the picture (see _render)."""
+        """Action text in two columns; their leader lines are part of the picture (see _render). Buttons the
+        picture has no place for (a mouse with more side buttons, say) go under it, in the same two columns."""
         c = self.canvas
-        for b, (side, y, _, _) in LABELS.items():
-            if b not in self.buttons:
-                continue
-            s = -1 if side == 'l' else 1
-            text = c.create_text(CX + s * (REACH + 53), y, anchor='e' if side == 'l' else 'w', font=FONT, tags=(f'b{b}',))
+        extra = [b for b in self.buttons if b not in LABELS]
+        places = {b: (side, y) for b, (side, y, _, _) in LABELS.items() if b in self.buttons}
+        if extra:
+            c.create_text(CX, H + 14, text='More buttons', fill=MUTED, font=('Segoe UI Semibold', 10))
+            for i, b in enumerate(extra):  # three columns: under the left labels, the mouse, the right labels
+                places[b] = ('lcr'[i % 3], H + 46 + i // 3 * EXTRA_ROW)
+        c.configure(height=round(self.extra_height() * self.k))
+        for b, (side, y) in places.items():
+            s = {'l': -1, 'c': 0, 'r': 1}[side]
+            text = c.create_text(CX + s * (REACH + 53), y, anchor={'l': 'e', 'c': 'center', 'r': 'w'}[side], font=FONT,
+                                 tags=(f'b{b}',))
             self.labels[b] = (text,)
             if b in self.editable:
                 c.tag_bind(f'b{b}', '<Button-1>', lambda e, b=b: self.select(b))
             else:
                 c.tag_bind(f'b{b}', '<Button-1>', lambda e: self.set_status('Left click is locked so you can always click.'))
+
+    def extra_height(self):
+        """Canvas height: the picture, plus the More buttons rows when this mouse has buttons beyond it."""
+        n = sum(b not in LABELS for b in self.buttons)
+        return H + 26 + (n + 2) // 3 * EXTRA_ROW if n else H
 
     def on_canvas_click(self, e):
         self.canvas.focus_set()
@@ -1234,7 +1250,8 @@ class App(tk.Tk):
             action = self.effective(b)[0] if editable else self.buttons[b][1]
             # like Synapse: green = remapped, white = factory, dim = can't change
             color = DIM if not editable else ACCENT if action != self.buttons[b][1] else FG
-            c.itemconfigure(text, text=rs.pretty(action), fill=color,
+            shown = rs.pretty(action) if b in LABELS else f'{self.buttons[b][0]}:  {rs.pretty(action)}'  # no line to it
+            c.itemconfigure(text, text=shown, fill=color,
                             font=('Segoe UI Semibold', 10) if sel else FONT)
         self.show_art()
         action, source = self.effective(self.sel)
@@ -1637,6 +1654,11 @@ class App(tk.Tk):
         self.sel = self.sel if self.sel in self.editable else self.editable[0]
         self._draw_mouse()
         self.load_profile(self.current)
+        w, h = self._min_size  # a mouse with More buttons needs a taller window
+        h += round((self.extra_height() - H) * self.k)
+        self.minsize(w, h)
+        if self.winfo_height() < h:
+            self.geometry(f'{max(w, self.winfo_width())}x{h}')
 
     def on_pick_mouse(self, pid):
         if pid == (self.mouse.pid or self.model['pids'][0]):  # already the picked one
