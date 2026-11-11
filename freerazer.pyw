@@ -39,6 +39,7 @@ MOUSE_CHOICES = [a for a in rs.ACTIONS if a.startswith('mouse:')]
 DPI_CHOICES = [a for a in rs.ACTIONS if a.startswith('dpi:')]
 REC_IDLE = 'Click, then press a key or combo'
 PAGE_PAD = 24  # content margin around every page (Windows app guidance)
+LIGHT_NAMES = {'off': 'Off', 'static': 'Static', 'breathing': 'Breathing', 'spectrum': 'Rainbow'}
 
 # Tk key names -> razer_switch key names (letters, digits and F-keys map by lowercasing)
 TK_KEYS = {'Return': 'enter', 'Escape': 'esc', 'BackSpace': 'backspace', 'Tab': 'tab', 'space': 'space',
@@ -671,6 +672,27 @@ class App(tk.Tk):
             val = ttk.Label(row, width=8, style='Muted.TLabel')
             val.pack(side='left', padx=(12, 0))
             self.power[key] = (sc, val, unit)
+        self.light_box = ttk.Frame(pg)  # shown only for a mouse whose light FreeRazer knows
+        ttk.Label(self.light_box, text='Lighting', style='H2.TLabel').pack(anchor='w', pady=(32, 0))
+        ttk.Label(self.light_box, text='The light on the mouse.', style='Muted.TLabel').pack(anchor='w', pady=(2, 12))
+        row = ttk.Frame(self.light_box)
+        row.pack(anchor='w')
+        self.light_var = tk.StringVar()
+        self._rgb = (0, 255, 0)  # colour for Static and Breathing, kept while another effect is on
+        for i, (key, text) in enumerate(LIGHT_NAMES.items()):
+            ttk.Radiobutton(row, text=text, value=key, variable=self.light_var, style='Seg.Toolbutton', width=9,
+                            command=self.light_changed).grid(row=0, column=i, padx=(0 if i == 0 else 2, 0))
+        ttk.Button(row, text='Colour…', style='Field.TButton', command=self.pick_colour).grid(row=0, column=4, padx=(16, 0))
+        self.swatch = tk.Frame(row, width=round(22 * k), height=round(22 * k), bg=BG)
+        self.swatch.grid(row=0, column=5, padx=(8, 0))
+        row = ttk.Frame(self.light_box)
+        row.pack(anchor='w', pady=(12, 0))
+        ttk.Label(row, text='Brightness', width=34).pack(side='left')
+        self.bright = Slider(row, 0, 100, round(260 * k), k, command=lambda v: self.bright_val.configure(text=f'{int(float(v))}%'),
+                             release=self.bright_changed)
+        self.bright.pack(side='left')
+        self.bright_val = ttk.Label(row, width=8, style='Muted.TLabel')
+        self.bright_val.pack(side='left', padx=(12, 0))
         self.perf_note = ttk.Label(pg, style='Muted.TLabel')
         self.perf_note.pack(anchor='w', pady=(24, 0))
 
@@ -1388,13 +1410,11 @@ class App(tk.Tk):
                 synapse = []
             self._q.put(lambda: self._synapse_done(synapse))
             try:
-                read = lambda: (self.mouse.battery(), self.mouse.dpi(), self.mouse.polling(), self.mouse.model,
-                                self.mouse.power())
-                info = read()
+                info = self.read_info()
                 fixed = self.keep_settings(info) if synapse else []
                 if fixed:  # Synapse's window pushes its own profile when it shows a mouse
                     time.sleep(0.4)
-                    info = read()
+                    info = self.read_info()
                     msg = f'Razer Synapse changed the {", ".join(fixed)}. FreeRazer put your settings back.'
                     self._q.put(lambda: self.set_status(msg))
             except (OSError, ValueError):
@@ -1402,6 +1422,11 @@ class App(tk.Tk):
             self._q.put(lambda: self._device_done(info))
         threading.Thread(target=work, daemon=True).start()
         self.after(30000, self.refresh_device)
+
+    def read_info(self):
+        """Everything the Performance page shows, read off the mouse (background thread only)."""
+        m = self.mouse
+        return m.battery(), m.dpi(), m.polling(), m.model, m.power(), m.lighting()
 
     def keep_settings(self, info):
         """Runs on the background thread while Synapse is open. Tested with Synapse 4: it leaves the mouse alone
@@ -1414,7 +1439,7 @@ class App(tk.Tk):
         if any(self.mouse.get_action(b) != a for b, a in want.items()):
             self.mouse.write(want)
             fixed.append('buttons')
-        (_, _), (x, _), hz, _, power = info
+        (_, _), (x, _), hz, _, power, _ = info
         keep = self.cfg.get('keep', {}).get(self.mouse.model['name'], {})
         for key, now, label, write in (('dpi', x, 'DPI', self.mouse.set_dpi), ('hz', hz, 'polling rate', self.mouse.set_polling),
                                        ('sleep', power and power[0], 'sleep time', self.mouse.set_sleep),
@@ -1452,12 +1477,13 @@ class App(tk.Tk):
             self.dpi_scale.enable(False)
             for sc, _, _ in self.power.values():
                 sc.enable(False)
+            self.light_box.pack_forget()
             self.perf_note.configure(text='Connect the mouse (plug it in or switch it on) to change these.')
             if self._connected:
                 self.set_status('Mouse disconnected. Profiles still save; they go on the mouse when it is back.')
             self._connected = False
             return
-        (level, charging), (x, y), hz, model, power = info
+        (level, charging), (x, y), hz, model, power, light = info
         self.dev_lbl.configure(text=f'Battery {level}%' + (' · charging' if charging else ''), style='HeadMuted.TLabel')
         verified = model['verified']
         self.dpi_rng = rs.dpi_range(model)
@@ -1482,6 +1508,18 @@ class App(tk.Tk):
                 sc.set(value)
                 self.power_sliding(key, value)
                 self._shown[key] = value
+        if light and verified:
+            effect, rgb, bright = light
+            if effect in ('static', 'breathing'):  # other effects read back no colour; keep the last one
+                self._rgb = rgb
+            self.light_var.set(effect)
+            self.swatch.configure(bg='#%02x%02x%02x' % self._rgb)
+            self.bright.set(bright)
+            self.bright_val.configure(text=f'{bright}%')
+            self._shown.update(light=(effect, self._rgb), bright=bright)
+            self.light_box.pack(anchor='w', before=self.perf_note)
+        else:
+            self.light_box.pack_forget()
         self.about_lbl.configure(text=f'{model["name"]}' + ('' if verified else ' (read-only, not verified yet)') +
                                  f'. Profiles are saved in {os.path.dirname(CFG)}.')
         if self.tray:
@@ -1528,6 +1566,31 @@ class App(tk.Tk):
         else:
             self._send(lambda: self.mouse.set_low_power(v), f'Low power mode now starts below {v}% battery.')
 
+    def light_changed(self):
+        effect, rgb = self.light_var.get(), self._rgb
+        if (effect, rgb) == self._shown.get('light'):
+            return
+        self._shown['light'] = (effect, rgb)
+        self._send(lambda: self.mouse.set_lighting(effect, rgb), f'Lighting set to {LIGHT_NAMES[effect]}.')
+
+    def pick_colour(self):
+        from tkinter import colorchooser
+        rgb = colorchooser.askcolor('#%02x%02x%02x' % self._rgb, parent=self, title='Light colour')[0]
+        if not rgb:
+            return
+        self._rgb = tuple(int(c) for c in rgb)
+        self.swatch.configure(bg='#%02x%02x%02x' % self._rgb)
+        if self.light_var.get() not in ('static', 'breathing'):  # a colour means a one-colour effect
+            self.light_var.set('static')
+        self.light_changed()
+
+    def bright_changed(self):
+        v = int(self.bright.get())
+        if not self.bright.on or v == self._shown.get('bright'):
+            return
+        self._shown['bright'] = v
+        self._send(lambda: self.mouse.set_brightness(v), f'Brightness set to {v}%.')
+
     def dpi_sliding(self, value):
         """While the slider moves, only the number follows; the mouse is set when it is let go."""
         self.dpi_var.set(str(slider_to_dpi(float(value), self.dpi_rng)))
@@ -1548,7 +1611,7 @@ class App(tk.Tk):
             try:
                 write()
                 time.sleep(0.4)  # polling-rate changes take ~0.3 s to show up
-                info = (self.mouse.battery(), self.mouse.dpi(), self.mouse.polling(), self.mouse.model, self.mouse.power())
+                info = self.read_info()
                 self._q.put(lambda: (self._device_done(info), self.set_status(done)))
             except (OSError, ValueError) as e:
                 msg = f'Could not change it: {e}'; self._q.put(lambda: self.set_status(msg))

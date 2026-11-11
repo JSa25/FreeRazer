@@ -14,12 +14,12 @@ ctypes.windll.shcore.SetProcessDpiAwareness(1)
 app = fr.App()
 app.write_cfg = lambda: None
 m = app.mouse
-read = lambda: (m.battery(), m.dpi(), m.polling(), m.model, m.power())
+read = app.read_info
 
 
 def run():
     before = read()
-    (_, _), (x, _), hz, _, (sleep, low) = before
+    (_, _), (x, _), hz, _, (sleep, low), _ = before
     for key, v in (('dpi', x), ('hz', hz), ('sleep', sleep), ('low', low)):
         app.remember(key, v)
     buttons = {b: m.get_action(b) for b in app.editable}

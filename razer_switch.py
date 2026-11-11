@@ -39,6 +39,7 @@ DEVICES = [
     # tested on the wireless dongle (0x007D); OpenRazer lists 0x007C for the cable, not tested here
     {'name': 'DeathAdder V2 Pro', 'pids': (0x007D,), 'txn': 0x1F, 'verified': True, 'drawing': 'generic',
      'dpi_max': 20000,  # OpenRazer's DPI_MAX for this model
+     'led': 0x04,  # the logo; every effect below tested on this mouse 2026-11-10
      'buttons': {
          1: ('Left Click', 'mouse:left'),
          2: ('Right Click', 'mouse:right'),
@@ -157,7 +158,9 @@ POLL_HZ = {0x40: 125, 0x10: 500, 0x08: 1000, 0x04: 2000, 0x02: 4000, 0x01: 8000}
 POLL_HZ_CLASSIC = {0x08: 125, 0x02: 500, 0x01: 1000}
 DPI_RANGE = (100, 50000)  # the range web Synapse offers for the V4 Pro
 # besides button sets (02/0C), the only writes allowed, and only on verified models
-SETTING_WRITES = {b'\x00\x40', b'\x00\x05', b'\x04\x06', b'\x07\x03', b'\x07\x01'}
+SETTING_WRITES = {b'\x00\x40', b'\x00\x05', b'\x04\x06', b'\x07\x03', b'\x07\x01', b'\x0f\x02', b'\x0f\x04'}
+# lighting (OpenRazer's extended matrix): 0F/02 sets the effect, 0F/04 the brightness; 0F/82 and 0F/84 read them
+LIGHT_EFFECTS = {'off': 0x00, 'static': 0x01, 'breathing': 0x02, 'spectrum': 0x03}
 # sleep when idle: 07/83 read, 07/03 set, seconds as 2 bytes (OpenRazer: 60-900; Synapse: 1-15 min)
 SLEEP_MIN = (1, 15)
 # low power mode: 07/81 read, 07/01 set, one byte out of 255 (the V4 Pro read 77 where Synapse showed 30%)
@@ -287,7 +290,8 @@ class Mouse:
                 self._connect()
                 # the one place packets go out: anything but a read must be a button set on a verified model
                 if not pkt[7] & 0x80 and not (self.model['verified'] and (
-                        (pkt[6:8] == b'\x02\x0c' and pkt[9] in editable(self.model)) or bytes(pkt[6:8]) in SETTING_WRITES)):
+                        (pkt[6:8] == b'\x02\x0c' and pkt[9] in editable(self.model)) or
+                        (bytes(pkt[6:8]) in SETTING_WRITES and (pkt[6] != 0x0F or pkt[9] == self.model.get('led'))))):
                     raise ValueError(f'refusing to send command {pkt[6]:02x}/{pkt[7]:02x} to {self.model["name"]}')
                 r = transact(self.dev, pkt)
             except OSError:
@@ -405,6 +409,35 @@ class Mouse:
             active, stages = 1, [(0, 0)]
         stages[active - 1] = (int(dpi), int(dpi))
         self.call(stages_packet(active, stages, self.txn))
+
+    def lighting(self):
+        """(effect name, (r, g, b), brightness %) of the model's LED, or None if it has none we know.
+        0F/82 answers storage, led, effect, 2 effect bytes, colour count, r, g, b."""
+        self.connect()
+        led = self.model.get('led')
+        if led is None:
+            return None
+        a = self.call(packet(0x0F, 0x82, [0x01, led], self.txn, size=0x0C))[8:]
+        b = self.call(packet(0x0F, 0x84, [0x01, led], self.txn, size=0x03))[8:]
+        effect = {v: k for k, v in LIGHT_EFFECTS.items()}.get(a[2], 'spectrum')
+        return effect, tuple(a[6:9]), byte_to_percent(b[2])
+
+    def set_lighting(self, effect, rgb=(0, 255, 0)):
+        self.connect()
+        led = self.model.get('led')
+        if led is None or effect not in LIGHT_EFFECTS:
+            raise ValueError(f'{self.model["name"]} has no {effect} lighting')
+        args = [0x01, led, LIGHT_EFFECTS[effect]]
+        if effect in ('static', 'breathing'):  # breathing's 1 = one colour
+            args += [0, 0, 1, *rgb] if effect == 'static' else [1, 0, 1, *rgb]
+        self.call(packet(0x0F, 0x02, args, self.txn, size=max(len(args), 6)))  # OpenRazer's sizes: 6 or 9
+
+    def set_brightness(self, percent):
+        self.connect()
+        led = self.model.get('led')
+        if led is None or not 0 <= int(percent) <= 100:
+            raise ValueError('brightness must be 0 to 100%')
+        self.call(packet(0x0F, 0x04, [0x01, led, percent_to_byte(int(percent))], self.txn, size=0x03))
 
 
 def describe(binding, model=DEVICES[0]):
@@ -622,7 +655,9 @@ def test():
     m.set_action(5, 'f7')
     assert m.dev.sent[-1] == bytes(cap)
     for bad in (lambda: m.set_action(1, 'f7'), lambda: m.set_action(6, 'f7'),
-                lambda: m.call(packet(0x0F, 0x02, [], 0x1F)),  # any other write-type command (this one is lighting)
+                lambda: m.call(packet(0x0F, 0x03, [], 0x1F)),  # any other write-type command (Synapse's lighting frame)
+                lambda: m.call(packet(0x0F, 0x02, [1, 4, 0], 0x1F)),  # lighting on a model with no known LED
+                lambda: m.set_lighting('off'),
                 lambda: m.call(set_packet(0x61, 'f7', 0x1F))):  # set packet for an ID not in the entry
         n = len(m.dev.sent)
         try:
@@ -690,6 +725,20 @@ def test():
             raise AssertionError('out-of-range power setting allowed')
         except ValueError:
             pass
+
+    # lighting, packets as sent to the DeathAdder V2 Pro logo in the 2026-11-10 test (each seen by eye)
+    m.model, m.dev = da, _FakeDev()
+    m.set_lighting('static', (255, 0, 0))
+    assert m.dev.sent[-1][5:17].hex(' ') == '09 0f 02 01 04 01 00 00 01 ff 00 00'
+    m.set_lighting('breathing', (255, 0, 0))
+    assert m.dev.sent[-1][5:17].hex(' ') == '09 0f 02 01 04 02 01 00 01 ff 00 00'
+    m.set_lighting('spectrum')
+    assert m.dev.sent[-1][5:11].hex(' ') == '06 0f 02 01 04 03'
+    m.set_brightness(33)
+    assert m.dev.sent[-1][5:11].hex(' ') == '03 0f 04 01 04 54'
+    assert m.lighting() is not None
+    m.model = v4
+    assert m.lighting() is None
 
     # profiles move to %APPDATA%: copied once from the old folder, never overwritten afterwards
     import tempfile
