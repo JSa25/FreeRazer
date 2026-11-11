@@ -60,6 +60,22 @@ TXN_GUESSES = (0x1F, 0x3F, 0xFF, 0x11)
 
 
 COMMON_BUTTONS = (1, 2, 3, 4, 5, 9, 10)
+# Buttons of database mice whose button IDs and factory actions were read off a real mouse in its factory state
+# (by its owner, with the probe). They replace the common buttons; each still unlocks only when it reads back
+# as its factory action (Mouse.confirm_buttons).
+_BASIC = {1: ('Left Click', 'mouse:left'), 2: ('Right Click', 'mouse:right'), 3: ('Scroll Click', 'mouse:middle'),
+          9: ('Scroll Up', 'mouse:scrollup'), 10: ('Scroll Down', 'mouse:scrolldown')}
+BUTTON_LAYOUTS = {
+    # Naga V2 HyperSpeed, GitHub issue 1: no IDs 4/5; the two thumb buttons switch DPI at factory settings, the
+    # 12-button grid is 0x40-0x4B in the order printed on it (1 = front column, bottom)
+    0x00B4: {**_BASIC, 0x0B: ('Top Thumb Button', 'raw:06:01'), 0x0C: ('Bottom Thumb Button', 'raw:06:02'),
+             0x34: ('Tilt Left', 'raw:0e:09008e'), 0x35: ('Tilt Right', 'raw:0e:0a008e'),
+             **{0x40 + i: (f'Side Button {i + 1}', key) for i, key in enumerate('1234567890-=')}},
+}
+# factory actions FreeRazer has no name for, exactly as a mouse above reads them back: only these raw values may
+# be written (to put a button back to factory)
+FACTORY_RAW = {'raw:06:01': 'DPI (factory)', 'raw:06:02': 'DPI (factory)',
+               'raw:0e:09008e': 'Tilt (factory)', 'raw:0e:0a008e': 'Tilt (factory)'}
 DB_FILE = 'devices.json'
 DB = {}  # pid -> mouse database entry, see use_db
 # commands the database may give a transaction ID for ('ccii': class, id)
@@ -103,7 +119,8 @@ def db_model(e):
     changed is decided on the mouse itself (Mouse.confirm_buttons)."""
     common = {b: v for b, v in DEVICES[0]['buttons'].items() if b in COMMON_BUTTONS}
     m = {'name': e['name'].removeprefix('Razer '), 'pids': (e['pid'],), 'txn': None, 'verified': False,
-         'drawing': 'generic', 'buttons': common, 'features': set(e.get('features', [])),
+         'drawing': 'generic', 'buttons': dict(BUTTON_LAYOUTS.get(e['pid'], common)),
+         'layout': e['pid'] in BUTTON_LAYOUTS, 'features': set(e.get('features', [])),
          'cmd_txn': {k: v for k, v in e.get('txn', {}).items()}, 'leds': list(e.get('leds', []))}
     for key in ('dpi_max', 'dpi_read_store', 'poll', 'poll_again_txn'):
         if key in e:
@@ -209,6 +226,8 @@ def pretty(action):
         return ' + '.join([m.title() for m in mods] + [pretty(key)])
     if action in _PRETTY:
         return _PRETTY[action]
+    if action in FACTORY_RAW:
+        return FACTORY_RAW[action]
     if action.startswith('raw:'):
         return 'Other (set elsewhere)'
     return action.upper() if len(action) == 1 or action[0] == 'f' and action[1:].isdigit() else action.title()
@@ -224,6 +243,9 @@ def encode(action):
         return 0x06, [0x06]  # as read back from the DPI button
     if action == 'hypershift':
         return 0x0C, [0x01]  # as read back after web Synapse made Mouse Button 5 the HyperShift key
+    if action in FACTORY_RAW:
+        _, kind, payload = action.split(':')
+        return int(kind, 16), list(bytes.fromhex(payload))
     if action in KEYS:
         return 0x02, [0x00, KEYS[action]]  # 00 = no modifier keys
     *mods, key = action.split('+')
@@ -402,7 +424,7 @@ class Mouse:
         self.connect()
         model = self.model
         known = self.confirmed.get(model['name'], set())
-        got = {b for b in editable(model) if b in COMMON_BUTTONS and b not in known
+        got = {b for b in model['buttons'] if b != 1 and (b in COMMON_BUTTONS or model.get('layout')) and b not in known
                and self._try(lambda b=b: self.get_action(b)) == model['buttons'][b][1]} | known
         if self.model is not model:  # reconnected to another mouse part way: nothing here can be trusted
             raise OSError('the mouse changed while its buttons were being read')
@@ -829,13 +851,19 @@ def probe_report(ids=range(1, 0x80)):
         print(f"  PID {i['product_id']:#06x} interface {i['interface_number']} usage {i['usage_page']:#06x}/"
               f"{i['usage']:#06x} {i['product_string']!r}")
     for pid in sorted({i['product_id'] for i in infos}):
-        found = None
+        found, asleep = None, False
         for info in (i for i in infos if i['product_id'] == pid):
             for txn in TXN_GUESSES:
                 d = hid.device()
                 try:
                     d.open_path(info['path'])
-                    if transact(d, read_packet(1, txn))[0] == 0x02:
+                    for _ in range(4):  # 04 = no answer in time: a wireless mouse asleep; give it time to wake
+                        status = transact(d, read_packet(1, txn))[0]
+                        if status != 0x04:
+                            break
+                        asleep = True
+                        time.sleep(0.5)
+                    if status == 0x02:
                         found = d, txn, info['interface_number']
                         break
                 except OSError:
@@ -844,7 +872,8 @@ def probe_report(ids=range(1, 0x80)):
             if found:
                 break
         if not found:
-            print(f'\nPID {pid:#06x}: no answer to button reads')
+            print(f'\nPID {pid:#06x}: ' + ('the mouse did not answer: it is probably asleep. Move it, then make the '
+                                          'report again' if asleep else 'no answer to button reads'))
             continue
         d, txn, iface = found
         known = model_for(pid)
@@ -979,6 +1008,37 @@ def test():
             assert not [p for p in m.dev.sent[n:] if p[6:8] == b'\x02\x0c' and p[10]]
             assert m.get_action(5) == factory(da, 5)  # no HyperShift key without the layer
             assert 4 + HS not in m.writable()
+    # Naga V2 HyperSpeed: buttons as its owner read them in factory state (GitHub issue 1)
+    naga = db_model({'pid': 0x00B4, 'name': 'Razer Naga V2 HyperSpeed (Receiver)', 'features': ['dpi']})
+    assert len(naga['buttons']) == 21 and 4 not in naga['buttons'] and 5 not in naga['buttons']
+    assert naga['buttons'][0x40] == ('Side Button 1', '1') and naga['buttons'][0x4B] == ('Side Button 12', '=')
+    for _, action in naga['buttons'].values():
+        assert decode(*encode(action)) == action, action  # every factory action can be written back exactly
+    assert encode('raw:0e:09008e') == (0x0E, [0x09, 0x00, 0x8E]) and pretty('raw:06:02') == 'DPI (factory)'
+    for bad in ('raw:06:03', 'raw:0e:09', 'raw:0c:01'):  # other raw values stay unwritable
+        try:
+            encode(bad)
+            raise AssertionError(f'{bad} encoded')
+        except ValueError:
+            pass
+    # factory scan bytes: 0x0B = type 06 payload 01, 0x34 = type 0e payload 09 00 8e, 0x40 = key 1 (1e)
+    assert decode(0x06, b'\x01') == 'raw:06:01' and decode(0x0E, b'\x09\x00\x8e') == 'raw:0e:09008e'
+    assert decode(0x02, b'\x00\x1e') == '1' and decode(0x02, b'\x00\x2e') == '='
+    m = Mouse()
+    m.dev, m.model, m.txn = _FakeDev(), naga, 0x1F
+    m.dev.actions = {b: encode(a) for b, (_, a) in naga['buttons'].items()}
+    m.dev.actions[0x41] = encode('r')  # one grid button still remapped elsewhere: stays locked
+    name, got = m.confirm_buttons()
+    assert got == set(b for b in naga['buttons'] if b != 1) - {0x41}, sorted(got)
+    m.confirmed = {name: got}
+    m.set_action(0x40, 'f13')
+    assert m.dev.sent[-1][8:15].hex(' ') == '01 40 00 02 02 00 68'
+    try:
+        m.set_action(0x41, 'f13')
+        raise AssertionError('unconfirmed grid button written')
+    except ValueError:
+        pass
+
     # a profile without HyperShift sends nothing on that layer to a mouse not known to have it
     m = Mouse()
     m.dev, m.model, m.txn = _FakeDev(), da, 0x1F
