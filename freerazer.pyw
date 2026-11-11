@@ -108,10 +108,11 @@ def leader(b):
     return [(CX + s * (REACH + 45), y), (CX + s * REACH, y), (CX + s * (REACH - 35), y), (CX + tx, ty)]
 
 
-APP_VERSION = '1.0.2'  # build.ps1 reads this; bump it for every release
+APP_VERSION = '1.0.3'  # build.ps1 reads this; bump it for every release
 UPDATE_REPO = 'JSa25/freerazer'  # GitHub repo whose Releases carry the installer
 SETUP_ASSET = 'FreeRazerSetup.exe'  # release asset, plus SETUP_ASSET + '.sha256'
 DB_URL = f'https://raw.githubusercontent.com/{UPDATE_REPO}/master/{rs.DB_FILE}'  # the mouse database, kept in the repo
+ISSUES_URL = f'https://github.com/{UPDATE_REPO}/issues/new'  # where mouse reports go
 NO_WINDOW = 0x08000000  # CREATE_NO_WINDOW: helper programs run without flashing a console
 
 
@@ -970,6 +971,14 @@ class App(tk.Tk):
         self.db_lbl = ttk.Label(row, style='Muted.TLabel')
         self.db_lbl.pack(side='left', padx=(12, 0))
         self.show_db()
+        ttk.Label(pg, text='Mouse missing buttons, or not known? Copy a report and paste it into an issue on GitHub. '
+                           'It only reads from the mouse.', style='Muted.TLabel').pack(anchor='w', pady=(12, 8))
+        row = ttk.Frame(pg)
+        row.pack(anchor='w')
+        self.report_btn = ttk.Button(row, text='Copy mouse report', command=self.copy_report)
+        self.report_btn.pack(side='left')
+        ttk.Button(row, text='Open GitHub issues', style='Link.TButton',
+                   command=lambda: os.startfile(ISSUES_URL)).pack(side='left', padx=(12, 0))
         ttk.Label(pg, text='About', style='H2.TLabel').pack(anchor='w', pady=(32, 4))
         self.about_lbl = ttk.Label(pg, style='Muted.TLabel')
         self.about_lbl.pack(anchor='w')
@@ -2235,6 +2244,32 @@ class App(tk.Tk):
     def show_db(self):
         v = str(self.db['version']) if self.db else ''
         self.db_lbl.configure(text=f'{len(rs.DB)} mice · from {v[:4]}-{v[4:6]}-{v[6:8]}' if self.db else 'Not loaded')
+
+    def copy_report(self):
+        """The read-only probe report (razer_switch.py probe) on the clipboard, for a GitHub issue. Runs in the
+        background under the mouse's lock, so the app's own reads can't interleave with it."""
+        import threading
+        self.report_btn.state(['disabled'])
+        self.set_status('Reading the mouse for the report (about 10 seconds)…')
+
+        def work():
+            try:
+                with self.mouse.lock:
+                    text = f'FreeRazer {APP_VERSION}\n' + rs.probe_report()
+                self._q.put(lambda: done(text))
+            except Exception as e:  # a report is optional: say what went wrong, never crash
+                log_error('mouse report')
+                self._q.put(lambda: done(None, e))
+
+        def done(text, e=None):
+            self.report_btn.state(['!disabled'])
+            if text is None:
+                return self.set_status(f'Could not make the report: {e}')
+            self.clipboard_clear()
+            self.clipboard_append(text)
+            self.set_status('Mouse report copied. Paste it into a new GitHub issue, with your mouse\'s name and its '
+                            'buttons.')
+        threading.Thread(target=work, daemon=True).start()
 
     def update_db(self, manual=True):
         """Download the newest mouse database from the repo; it is checked in full before it is used or saved.

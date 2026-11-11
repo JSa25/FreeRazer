@@ -816,7 +816,13 @@ def show():
 
 
 def probe(ids=range(1, 0x80)):
-    """Read-only report for adding a mouse. Sends only button reads (class 02, id 8C)."""
+    print(probe_report(ids))
+
+
+def probe_report(ids=range(1, 0x80)):
+    """Read-only report for adding a mouse, as text. Sends only button reads (class 02, id 8C)."""
+    out = []
+    print = out.append  # the lines below were written for the command line
     print('Razer HID devices:')
     infos = hid.enumerate(VID)
     for i in infos:
@@ -843,7 +849,7 @@ def probe(ids=range(1, 0x80)):
         d, txn, iface = found
         known = model_for(pid)
         print(f'\nPID {pid:#06x}: answers on interface {iface} with transaction ID {txn:#04x}'
-              f' (in device table: {known["name"] if known["txn"] else "no"})')
+              f' (FreeRazer knows it as: {known["name"]}, {"built in" if known["verified"] else "from the mouse database" if pid in DB else "not known"})')
         print('  id   status type len payload        decoded   (unused IDs may show leftover memory)')
         try:
             for b in ids:
@@ -855,6 +861,7 @@ def probe(ids=range(1, 0x80)):
         finally:
             d.close()
     print('\nPaste this whole report into a new issue, and say which physical buttons your mouse has.')
+    return '\n'.join(out)
 
 
 class _FakeDev:

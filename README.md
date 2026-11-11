@@ -212,8 +212,10 @@ Installed copies check GitHub Releases at most once a day (or when you click Che
 For a Razer mouse that isn't in the [supported mice](#supported-mice) list. The list comes from OpenRazer, so once OpenRazer supports a new mouse it reaches FreeRazer by itself within a week. To get one added sooner, or one OpenRazer doesn't have, you need the mouse and a few minutes. Nothing is written to the mouse.
 
 1. Close Razer Synapse.
-2. Run `py -3.13 razer_switch.py probe` and wait for it to finish (it reads about 130 values).
+2. In FreeRazer, go to Settings > Mouse database and press **Copy mouse report**. It takes about 10 seconds. (From source: `py -3.13 razer_switch.py probe`.)
 3. Open an issue titled with your mouse's name (for example "Add Basilisk V3 Pro") and paste the whole report. Also list the physical buttons your mouse has (for example: 2 side buttons, DPI button on top) and, if you know them, what each does at factory settings.
+
+The same works for a mouse that is listed but is missing buttons, such as a Naga's side grid.
 
 What the report contains: the USB product IDs of your Razer devices, which transaction ID the mouse answers to, and what the mouse returns for button IDs 1 to 127.
 
