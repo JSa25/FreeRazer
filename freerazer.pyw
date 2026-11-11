@@ -521,8 +521,10 @@ class App(tk.Tk):
         active = self.cfg.get('active', 'default')
         self.base = active if active not in self.cfg['links'].values() else 'default'
         self._start_tray()
-        if self.startup_var.get():
-            set_startup(True)  # keep the entry pointing here if the app was moved
+        if self.startup_var.get() and getattr(sys, 'frozen', False):
+            # keep the entry pointing here if the installed app was moved; a copy run from source (tests, a
+            # developer) must not take Windows startup away from the installed one
+            set_startup(True)
         if '--tray' in sys.argv and self.tray:  # started with Windows: go straight to the tray
             self._told_tray = True
             self.withdraw()
