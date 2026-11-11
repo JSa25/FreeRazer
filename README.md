@@ -229,14 +229,11 @@ To rebuild the database from a newer OpenRazer: `py -3.13 tools/gen_devices.py r
 
 Mice without their own drawing get a generic one (`'drawing': 'generic'`).
 
-## Contributors
-
-- [JSa25](https://github.com/JSa25): author
-- [Claude](https://www.anthropic.com/claude) by Anthropic: AI co-developer, co-author on the commits
-
 ## Credits
 
 FreeRazer stands on the work of the [OpenRazer](https://github.com/openrazer/openrazer) project, the open-source Razer driver for Linux. The supported mice list, the mouse database (`devices.json`) and the lighting commands all come from what OpenRazer's contributors worked out. FreeRazer contains none of OpenRazer's code: `tools/gen_devices.py` reads their driver source and keeps only the facts (device IDs, names, which command each mouse takes). OpenRazer is licensed GPL-2.0. If you use Linux, use OpenRazer.
+
+Built with help from AI (Claude by Anthropic).
 
 FreeRazer is not affiliated with or endorsed by Razer or the OpenRazer project.
 
