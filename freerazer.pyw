@@ -352,8 +352,8 @@ class App(tk.Tk):
         self.cfg.setdefault('profiles', {})
         self.cfg.setdefault('links', {})  # game exe name -> profile
         self.mouse = rs.Mouse()
-        # shortcut: model is picked once at start (V4 Pro layout if no mouse is plugged in); restart after swapping mice
-        self.model = rs.detect() or rs.DEVICES[0]
+        self.mouse.pid = self.cfg.get('mouse')  # picked in the header when several mice are plugged in
+        self.model = rs.detect(self.mouse.pid) or rs.DEVICES[0]  # V4 Pro layout until a mouse is found
         self.buttons, self.editable = self.model['buttons'], rs.editable(self.model)
         migrate_startup()
         self.current, self.sel, self.edit, self.recording = 'default', 5, {}, False
@@ -583,6 +583,9 @@ class App(tk.Tk):
         self.apply_btn = ttk.Button(hd, text='Apply to mouse', style='Head.Accent.TButton', command=self.apply)
         self.dev_lbl = ttk.Label(hd, style='HeadMuted.TLabel', text='Looking for the mouse…')
         self.dev_lbl.pack(side='right')
+        self.mouse_box = ttk.Combobox(hd, state='readonly', width=18, style='Head.TCombobox')  # only with 2+ mice
+        self.mouse_box.bind('<<ComboboxSelected>>', self.on_pick_mouse)
+        self._mice = []
         self.warn_lbl = ttk.Label(hd, style='HeadWarn.TLabel')  # shown while Razer Synapse is running
         self._synapse = []
         self.menu = tk.Menu(self, tearoff=False, bg=PANEL, fg=FG, activebackground=SEL_FILL,
@@ -1398,7 +1401,7 @@ class App(tk.Tk):
         self.set_status(f'Mouse is on "{self.shown(active)}": {rs.describe(on_mouse, self.model)}')
 
     # ---------- battery, DPI and staying connected ----------
-    def refresh_device(self):
+    def refresh_device(self, repeat=True):
         """Every 30 s, read battery and DPI off the main thread (the reads take ~0.5 s).
         A failed read means the mouse was unplugged, switched off or asleep; the next one reconnects."""
         import threading
@@ -1409,6 +1412,11 @@ class App(tk.Tk):
             except OSError:
                 synapse = []
             self._q.put(lambda: self._synapse_done(synapse))
+            try:
+                found = rs.connected()
+            except OSError:
+                found = []
+            self._q.put(lambda: self._mice_done(found))
             try:
                 info = self.read_info()
                 fixed = self.keep_settings(info) if synapse else []
@@ -1421,7 +1429,30 @@ class App(tk.Tk):
                 info = None
             self._q.put(lambda: self._device_done(info))
         threading.Thread(target=work, daemon=True).start()
-        self.after(30000, self.refresh_device)
+        if repeat:
+            self.after(30000, self.refresh_device)
+
+    def _mice_done(self, found):
+        """Show the mouse picker only while more than one Razer mouse is plugged in."""
+        self._mice = found
+        if len(found) < 2:
+            return self.mouse_box.pack_forget()
+        self.mouse_box.configure(values=[name for _, name in found])
+        names = dict(found)
+        self.mouse_box.set(names.get(self.mouse.pid) or names.get(self.model['pids'][0], found[0][1]))
+        self.mouse_box.pack(side='right', padx=(12, 0), before=self.dev_lbl)
+
+    def on_pick_mouse(self, _=None):
+        pid = self._mice[self.mouse_box.current()][0]
+        self.mouse_box.selection_clear()
+        if pid in self.model['pids']:  # already the one shown
+            return
+        self.cfg['mouse'] = pid
+        self.write_cfg()
+        self.mouse.choose(pid)
+        self._connected = False  # _device_done then redraws the buttons for the newly picked model
+        self.dev_lbl.configure(text='Switching mouse…')
+        self.refresh_device(repeat=False)
 
     def read_info(self):
         """Everything the Performance page shows, read off the mouse (background thread only)."""

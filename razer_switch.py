@@ -80,9 +80,19 @@ def mice():
     return sorted(infos, key=lambda i: model_for(i['product_id'])['txn'] is None)
 
 
-def detect():
-    """Model of the first Razer mouse plugged in, without opening it; None if there is none."""
+def connected():
+    """[(pid, model name)] of the Razer mice plugged in, one per PID, in mice() order.
+    shortcut: two mice of the same model share a PID and show once; tell them apart by HID path if that comes up."""
+    out = {}
+    for i in mice():
+        out.setdefault(i['product_id'], model_for(i['product_id'], i['product_string'])['name'])
+    return list(out.items())
+
+
+def detect(pid=None):
+    """Model of the chosen Razer mouse (else the first) plugged in, without opening it; None if there is none."""
     infos = mice()
+    infos = [i for i in infos if i['product_id'] == pid] or infos
     return model_for(infos[0]['product_id'], infos[0]['product_string']) if infos else None
 
 # action type 01: payload is the mouse button number, as the left/right/middle/scroll IDs report it
@@ -261,7 +271,15 @@ class Mouse:
     def __init__(self):
         self.dev, self.model, self.txn = None, None, None
         self.poll_table = None  # POLL_HZ or POLL_HZ_CLASSIC, whichever this mouse answered to
+        self.pid = None  # the mouse picked in the app when several are plugged in; None = the first found
         self.lock = threading.RLock()  # the app reads battery/DPI on a background thread while writes happen on the main one
+
+    def choose(self, pid):
+        """Talk to this mouse from now on (it is opened on the next call)."""
+        with self.lock:
+            if self.dev:
+                self.dev.close()
+            self.dev, self.pid = None, pid
 
     def connect(self):
         with self.lock:
@@ -270,7 +288,10 @@ class Mouse:
     def _connect(self):
         if self.dev:
             return
-        for info in mice():
+        found = mice()
+        if self.pid in {i['product_id'] for i in found}:  # the picked one if it is plugged in, else whichever is
+            found = [i for i in found if i['product_id'] == self.pid]
+        for info in found:
             model = model_for(info['product_id'], info['product_string'])
             for txn in (model['txn'],) if model['txn'] else TXN_GUESSES:
                 d = hid.device()
