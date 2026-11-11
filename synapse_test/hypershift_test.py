@@ -71,6 +71,32 @@ def run():
     check('HyperShift key on both layers', '01 05 00 0c 01 01 00' in sent and '01 05 01 0c 01 01 00' in sent)
     check('F9 on HyperShift layer button 4', '01 04 01 02 02 00 42' in sent and '01 04 00 01 01 04 00' in sent)
     print('status:', app.status.cget('text'), flush=True)
+    # any other mouse: the DeathAdder V2 Pro on stand-ins, one that has the layer and one that ignores it
+    da = rs.model_for(0x007D)
+    for store, has in (('layers', True), ('ignore', False)):
+        app.mouse.hs, app.cfg['hypershift'] = {}, {}
+        fake = rs.Mouse()
+        fake.dev, fake.model, fake.txn, fake.hs = rs._FakeDev(), da, 0x1F, app.mouse.hs
+        fake.dev.store = store
+        app.mouse = fake
+        app.model = rs.DEVICES[0]  # so _use_model rebuilds
+        app._use_model(da)
+        app.load_profile('HS test')
+        check(f'{store}: switch shown before anything is known', app.layer_row.winfo_ismapped())
+        app.put_on_mouse('HS test')
+        check(f'{store}: learned and saved', app.cfg['hypershift'] == {da['name']: has})
+        check(f'{store}: switch {"kept" if has else "hidden"}', app.layer_row.winfo_ismapped() == has)
+        normal = {b: fake.get_action(b) for b in rs.editable(da) if not b & HS}
+        want = {b: 'hypershift' if b == 5 else a for b, a in rs.resolve({}, None, da).items() if not b & HS}
+        check(f'{store}: normal buttons right on the mouse', normal == (want if has else {
+            b: a for b, a in rs.resolve({}, None, da).items() if not b & HS}))
+        print('  status:', app.status.cget('text'), flush=True)
+        app.read_mouse()
+        check(f'{store}: read back as the profile', app.cfg['active'] == 'HS test' or not has)
+        if not has:
+            app.select(5); app.mode_var.set('mouse'); app.show_mode()
+            check('ignore: HyperShift no longer offered', 'hypershift' not in app.pick_items)
+            app.close_popover()
     print('all ok' if all(ok) else 'SOME FAILED', flush=True)
     app.quit_app()
 

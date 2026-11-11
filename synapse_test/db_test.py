@@ -54,7 +54,7 @@ def db_mouse():
     app.mouse = fake
     app._use_model(m)
     app.read_mouse()
-    check(f'confirmed buttons {app.editable}', app.editable == [2, 3, 4])
+    check(f'confirmed buttons {app.editable}', app.editable == [2, 3, 4, 2 + rs.HS, 3 + rs.HS, 4 + rs.HS])
     check('confirmations remembered', app.cfg['confirmed'].get(m['name']) == [2, 3, 4])
     info = ((80, False), (1600, 1600), 1000, m, (5, 10), None)
     app._device_done(info)

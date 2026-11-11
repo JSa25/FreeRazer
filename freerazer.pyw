@@ -38,6 +38,7 @@ def check_cfg(cfg):
     need(str_dict(cfg.get('confirmed', {}), lambda ids: isinstance(ids, list) and all(
         isinstance(b, int) and not isinstance(b, bool) for b in ids)), '"confirmed"')
     need(str_dict(cfg.get('keep', {}), lambda d: isinstance(d, dict)), '"keep"')
+    need(str_dict(cfg.get('hypershift', {}), lambda v: isinstance(v, bool)), '"hypershift"')
     need(isinstance(cfg.get('active', 'default'), str), '"active"')
     need(cfg.get('mouse') is None or isinstance(cfg['mouse'], int), '"mouse"')
 
@@ -499,6 +500,7 @@ class App(tk.Tk):
         self.mouse.pid = self.cfg.get('mouse')  # picked in the header when several mice are plugged in
         # buttons that read back as their factory action, per model; see Mouse.confirm_buttons
         self.mouse.confirmed = {n: set(ids) for n, ids in self.cfg.get('confirmed', {}).items()}
+        self.mouse.hs = dict(self.cfg.get('hypershift', {}))  # which mice turned out to have a HyperShift layer
         self.model = rs.detect(self.mouse.pid) or rs.DEVICES[0]  # V4 Pro layout until a mouse is found
         self.buttons, self.editable = self.model['buttons'], self.editable_for(self.model)
         migrate_startup()
@@ -553,13 +555,15 @@ class App(tk.Tk):
         """Buttons that can be changed: all but left click on a mouse tested here; on any other mouse, the ones
         that read back as their factory action (confirmed when it connects)."""
         ids = rs.editable(model)
-        return ids if model['verified'] else [b for b in ids if b in self.mouse.confirmed.get(model['name'], ())]
+        return ids if model['verified'] else [b for b in ids if b & 0xFF in self.mouse.confirmed.get(model['name'], ())]
 
     def resolved(self, name):
         """{button: action} a profile puts on the mouse; ValueError for a missing profile or a bad action."""
         if name != 'default' and name not in self.cfg['profiles']:
             raise ValueError(f'there is no profile called "{name}"')
         full = rs.resolve({}, None if name == 'default' else self.cfg['profiles'][name], self.model)
+        if not self.hs_ok():  # this mouse has no HyperShift layer: normal buttons only, no HyperShift key
+            full = {b: rs.factory(self.model, b) if a == 'hypershift' else a for b, a in full.items() if not b & rs.HS}
         return {b: a for b, a in full.items() if b in self.editable}
 
     def effective(self, b):
@@ -571,12 +575,17 @@ class App(tk.Tk):
             return self.edit[key], 'Changed in this profile'
         return self.buttons[b][1], 'Factory setting'
 
+    def hs_ok(self, known=False):
+        """This mouse may have a HyperShift layer: it isn't known not to (known=True: it is known to)."""
+        seen = True if self.model.get('hypershift') else self.mouse.hs.get(self.model['name'])
+        return seen is True if known else seen is not False
+
     def hs_key(self, b):
         """Button b is the HyperShift key in the profile being edited."""
-        return bool(self.model.get('hypershift')) and self.edit.get(str(b)) == 'hypershift'
+        return self.hs_ok() and self.edit.get(str(b)) == 'hypershift'
 
     def show_layer_row(self):
-        if self.model.get('hypershift'):
+        if self.hs_ok():
             self.layer_row.place(in_=self.canvas, relx=0.5, rely=1.0, y=4, anchor='n')
         else:
             self.layer_row.place_forget()
@@ -1387,7 +1396,7 @@ class App(tk.Tk):
         if mode == 'key':
             return self.rec_btn.pack(fill='both', expand=True)
         self.pick_items = DPI_CHOICES if mode == 'dpi' else MOUSE_CHOICES + (
-            ['hypershift'] if self.model.get('hypershift') and not self.layer else [])  # the key lives on Standard
+            ['hypershift'] if self.hs_ok() and not self.layer else [])  # the key lives on Standard
         self.pick_box['values'] = [rs.pretty(a) for a in self.pick_items]
         current = self.effective(self.sel)[0]
         self.pick_box.set(rs.pretty(current) if current in self.pick_items else 'Choose…')
@@ -1656,13 +1665,23 @@ class App(tk.Tk):
                 binding = self.resolved(name)
                 self.mouse.write(binding)
             except (OSError, ValueError) as e:
+                self.learned_hs()
                 self.set_status(f'Could not put "{self.shown(name)}" on the mouse: {e}')
                 return False
+            self.learned_hs()
             self.cfg['active'] = name
         self.write_cfg()
         self.refresh_list()
         self.set_status(f'Mouse is on "{self.shown(name)}"{why}: {rs.describe(binding, self.model)}')
         return True
+
+    def learned_hs(self):
+        """Save whether a mouse turned out to have a HyperShift layer; hide the switch on one that hasn't."""
+        if self.mouse.hs != self.cfg.get('hypershift', {}):
+            self.cfg['hypershift'] = dict(self.mouse.hs)
+            self.write_cfg()
+            self.show_layer_row()
+            self.redraw()
 
     # ---------- game profiles ----------
     def link_game(self):
@@ -1725,7 +1744,10 @@ class App(tk.Tk):
         try:
             if not self.model['verified']:
                 self.confirm_buttons()
-            on_mouse = {b: self.mouse.get_action(b) for b in self.editable}
+            # the HyperShift layer only once the mouse is known to have one: otherwise it may answer for the
+            # normal buttons, which would never match a profile
+            ids = [b for b in self.editable if not b & rs.HS or self.hs_ok(known=True)]
+            on_mouse = {b: self.mouse.get_action(b) for b in ids}
         except OSError as e:
             self.set_status(f'Mouse not found: {e}')
             return
@@ -1734,7 +1756,7 @@ class App(tk.Tk):
                                    'stay as they are. Reset the mouse to factory settings in Razer Synapse to unlock them.')
         def same(name):
             try:
-                return self.resolved(name) == on_mouse
+                return {b: a for b, a in self.resolved(name).items() if b in on_mouse} == on_mouse
             except ValueError:  # a profile with an action the app can't use: it can't be what's on the mouse
                 return False
         matches = [n for n in self.names() if same(n)]

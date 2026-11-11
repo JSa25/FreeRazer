@@ -136,10 +136,10 @@ HS = 0x100  # button ID + HS = that button on the HyperShift layer (byte 2 of 02
 
 
 def editable(model):
-    """Buttons a profile may change. Left click stays left click, so you can't lock yourself out. A model with
-    HyperShift also has each of them on the HyperShift layer, as ID + HS."""
+    """Buttons a profile may change, and each of them on the HyperShift layer as ID + HS. Left click stays left
+    click, so you can't lock yourself out."""
     ids = [b for b in model['buttons'] if b != 1]
-    return ids + [b + HS for b in ids] if model.get('hypershift') else ids
+    return ids + [b + HS for b in ids]
 
 
 def factory(model, b):
@@ -329,7 +329,7 @@ def resolve(default, own=None, model=DEVICES[0]):
                 out[b] = factory(model, b) if action == 'default' else decode(*encode(action))
     # the HyperShift key is the HyperShift key on both layers (as Synapse leaves it); nothing else is
     for b, action in out.items():
-        if action == 'hypershift' and (not model.get('hypershift') or b & HS):
+        if action == 'hypershift' and b & HS:
             out[b] = factory(model, b)
     for b in [b for b in out if not b & HS and out[b] == 'hypershift']:
         out[b + HS] = 'hypershift'
@@ -378,12 +378,20 @@ class Mouse:
         self.poll_table = None  # POLL_HZ or POLL_HZ_CLASSIC, whichever this mouse answered to
         self.pid = None  # the mouse picked in the app when several are plugged in; None = the first found
         self.confirmed = {}  # model name: buttons of a mouse not tested here that read back as their factory action
+        self.hs = {}  # model name: whether it has a HyperShift layer, once a HyperShift write showed it (see write)
         self.lock = threading.RLock()  # the app reads battery/DPI on a background thread while writes happen on the main one
 
+    def has_hs(self):
+        """True: this mouse has a HyperShift layer; False: it hasn't; None: not known yet."""
+        return True if self.model.get('hypershift') else self.hs.get(self.model['name'])
+
     def writable(self):
-        """Buttons that may be changed: all but left click on a mouse tested here, else the confirmed ones."""
-        ids = editable(self.model)
-        return set(ids) if self.model['verified'] else self.confirmed.get(self.model['name'], set()) & set(ids)
+        """Buttons that may be changed: all but left click on a mouse tested here, else the confirmed ones; on
+        the HyperShift layer too unless the mouse turned out not to have one."""
+        ids = [b for b in editable(self.model) if not (b & HS and self.has_hs() is False)]
+        if self.model['verified']:
+            return set(ids)
+        return {b for b in ids if b & 0xFF in self.confirmed.get(self.model['name'], set())}
 
     @_locked
     def confirm_buttons(self):
@@ -483,8 +491,37 @@ class Mouse:
 
     @_locked
     def write(self, binding):
-        for b, action in binding.items():
+        """Put a binding on the mouse. A mouse with no HyperShift layer may ignore the layer byte and take a
+        HyperShift write as a normal one, so until a mouse is known to have the layer, only HyperShift buttons
+        that differ from their normal action are sent, and the normal buttons are read back afterwards: if they
+        changed, they are put back and the mouse is remembered as having no HyperShift."""
+        self.connect()
+        hs = self.has_hs()
+        std = {b: a for b, a in binding.items() if not b & HS}
+        if hs is False:  # no HyperShift key either; that button keeps its factory action
+            std = {b: factory(self.model, b) if a == 'hypershift' else a for b, a in std.items()}
+        uses = 'hypershift' in std.values() or any(a != factory(self.model, b) for b, a in binding.items() if b & HS)
+        layer = {} if hs is False or not (hs or uses) else {
+            b: a for b, a in binding.items() if b & HS and (hs or a != std.get(b - HS))}
+        for b, action in std.items():
             self.set_action(b, action)
+        try:
+            for b, action in layer.items():
+                self.set_action(b, action)
+        except OSError as e:
+            if 'rejected' not in str(e) or hs:
+                raise
+            self.hs[self.model['name']] = False
+            raise OSError(f'{self.model["name"]} has no HyperShift layer (it refused the HyperShift buttons). '
+                          'Its normal buttons are on')
+        if layer and not hs:
+            ok = {b: self.get_action(b) for b in std} == std
+            self.hs[self.model['name']] = ok
+            if not ok:  # no layer, so no HyperShift key either: that button gets its factory action
+                for b, action in std.items():
+                    self.set_action(b, factory(self.model, b) if action == 'hypershift' else action)
+                raise OSError(f'{self.model["name"]} has no HyperShift layer: it took the HyperShift buttons as normal '
+                              'ones. Its normal buttons were put back')
 
     def read(self, cls, cmd, args=(), size=0x0A):
         """Args part of the answer to a read-only query (command id has the 0x80 bit set). `size` is OpenRazer's
@@ -828,16 +865,24 @@ class _FakeDev:
         self.stray = 0  # how many of the next answers belong to another program's command
         self.actions = {}  # button: (action type, payload) for button reads to answer with
 
+    store = None  # 'layers': button sets are kept per layer and read back; 'ignore': kept, layer byte ignored
+
+    def _key(self, p):
+        return p[9] + (p[10] << 8 if self.store == 'layers' else 0)
+
     def send_feature_report(self, data):
         self.sent.append(bytes(data[1:]))
+        p = self.sent[-1]
+        if self.store and (p[6], p[7]) == (0x02, 0x0C):
+            self.actions[self._key(p)] = (p[11], list(p[13:13 + p[12]]))
 
     def get_feature_report(self, _id, _n):
         last = self.sent[-1] if self.sent else bytes(90)
         if self.stray:  # an answer to someone else's command, like Synapse's lighting frames
             self.stray -= 1
             return b'\x00\x02' + bytes(4) + b'\x08\x0f\x03' + bytes(82)
-        if (last[6], last[7]) == (0x02, 0x8C) and last[9] in self.actions:
-            kind, payload = self.actions[last[9]]
+        if (last[6], last[7]) == (0x02, 0x8C) and self._key(last) in self.actions:
+            kind, payload = self.actions[self._key(last)]
             args = bytes([last[8], last[9], 0, kind, len(payload), *payload])
             return b'\x00\x02' + last[1:8] + args + bytes(82 - len(args))
         status = b'\x04' if (last[6], last[7]) in self.timeout else b'\x05' if (last[6], last[7]) in self.refuse else b'\x02'
@@ -883,8 +928,8 @@ def test():
     for d in DEVICES:
         assert d['buttons'].get(1, (0, 0))[1] == 'mouse:left', d['name']
         assert not d['verified'] or d['txn'], d['name']
-        for b, (_, factory) in d['buttons'].items():
-            encode(factory)
+        for b, (_, action) in d['buttons'].items():
+            encode(action)
     assert model_for(0x00E6) is v4 and v4['verified'] and v4['txn'] == 0x1F
     assert set(v4['buttons']) == {1, 2, 3, 4, 5, 9, 10, 0x60}
     other = model_for(0x0BAD, 'Some Mouse')
@@ -900,9 +945,49 @@ def test():
     assert full[5] == full[5 + HS] == 'hypershift' and full[4 + HS] == 'f9' and full[4] == 'mouse:back'
     assert len(full) == 14 and 1 + HS not in full
     assert describe(full, v4) == 'Mouse Button 5 = Razer HyperShift, Mouse Button 4 (HyperShift) = F9'
-    # HyperShift on the HyperShift layer only (no key on the standard one), or on a mouse without it: factory
+    # HyperShift on the HyperShift layer only (no key on the standard one): factory; every mouse gets the layer
     assert resolve({}, {str(3 + HS): 'hypershift'}, v4)[3 + HS] == 'mouse:middle'
-    assert resolve({}, {'5': 'hypershift', str(4 + HS): 'f9'}, other) == resolve({}, None, other)
+    assert resolve({}, {'5': 'hypershift', str(4 + HS): 'f9'}, other)[4 + HS] == 'f9'
+    da = model_for(0x007D)
+    hs_prof = resolve({}, {'5': 'hypershift', '3': 'e', str(4 + HS): 'f9'}, da)
+    for store, want in (('layers', True), ('ignore', False)):
+        m = Mouse()
+        m.dev, m.model, m.txn = _FakeDev(), da, 0x1F
+        m.dev.store = store
+        try:
+            m.write(hs_prof)
+            assert want, 'a mouse that ignores the layer passed'
+        except OSError as e:
+            assert not want and 'no HyperShift' in str(e), e
+        assert m.hs[da['name']] is want and m.has_hs() is want
+        sets = [p for p in m.dev.sent if p[6:8] == b'\x02\x0c']
+        # unknown mouse: only HyperShift buttons that differ from normal are sent (3 is E normally, Scroll Click here)
+        assert [p[9] for p in sets if p[10]] == [3, 4], [p[8:12].hex() for p in sets if p[10]]
+        normal = {b: m.get_action(b) for b in hs_prof if not b & HS}
+        assert normal == {b: factory(da, b) if a == 'hypershift' and not want else a
+                          for b, a in hs_prof.items() if not b & HS}, normal  # normal buttons as they should be
+        if not want:  # remembered: nothing on the HyperShift layer is sent or allowed again
+            n = len(m.dev.sent)
+            m.write(hs_prof)
+            assert not [p for p in m.dev.sent[n:] if p[6:8] == b'\x02\x0c' and p[10]]
+            assert m.get_action(5) == factory(da, 5)  # no HyperShift key without the layer
+            assert 4 + HS not in m.writable()
+    # a profile without HyperShift sends nothing on that layer to a mouse not known to have it
+    m = Mouse()
+    m.dev, m.model, m.txn = _FakeDev(), da, 0x1F
+    m.write(resolve({}, {'3': 'e'}, da))
+    assert not [p for p in m.dev.sent if p[6:8] == b'\x02\x0c' and p[10]] and m.has_hs() is None
+    # a mouse that refuses HyperShift writes: remembered too, normal buttons stay on
+    m = Mouse()
+    m.dev, m.model, m.txn = _FakeDev(), da, 0x1F
+    m.dev.refuse = set()
+    real_send = m.dev.send_feature_report
+    m.dev.send_feature_report = lambda d: (real_send(d), m.dev.refuse.add((2, 12)) if d[1 + 10] else m.dev.refuse.discard((2, 12)))
+    try:
+        m.write(hs_prof)
+        raise AssertionError('refused HyperShift write passed')
+    except OSError as e:
+        assert 'refused' in str(e) and m.hs[da['name']] is False
     for bad in (str(1 + HS),):
         try:
             resolve({}, {bad: 'f5'}, v4)
@@ -945,12 +1030,6 @@ def test():
     assert m.dev.sent[-1][5:10].hex(' ') == '02 00 40 01 10' and m.polling_rates()[-1] == 8000
     da = model_for(0x007D)
     assert da['verified'] and set(da['buttons']) == {1, 2, 3, 4, 5, 9, 10}
-    m.model, m.dev = da, _FakeDev()
-    try:
-        m.set_action(4 + HS, 'f9')  # HyperShift only where it was checked on the mouse
-        raise AssertionError('HyperShift layer written on a mouse without it')
-    except ValueError:
-        assert not m.dev.sent
     m.model, m.poll_table, m.dev = da, None, _FakeDev(refuse={(0x00, 0xC0)})
     m.set_polling(500)
     assert m.poll_table is POLL_HZ_CLASSIC and m.polling_rates() == [125, 500, 1000]
