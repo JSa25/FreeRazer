@@ -200,6 +200,17 @@ def rounded_image(size, r, fill, outline=None, k=1.0):
     return ImageTk.PhotoImage(img.resize((w, h), Image.LANCZOS))
 
 
+def round_corners(win):
+    """Windows 11 rounds the window's corners and gives it a thin border; older Windows leaves it square."""
+    try:
+        hwnd = int(win.wm_frame(), 16)
+        r, g, b = (int(LINE[i:i + 2], 16) for i in (1, 3, 5))
+        for attr, value in ((33, 2), (34, b << 16 | g << 8 | r)):  # DWMWA_WINDOW_CORNER_PREFERENCE = round, border colour
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, attr, ctypes.byref(ctypes.c_int(value)), 4)
+    except (OSError, ValueError, AttributeError):
+        pass
+
+
 def chevron_image(up, color, k=1.0):
     """A small anti-aliased arrow for combobox and spinbox buttons, on a transparent background."""
     from PIL import Image, ImageDraw, ImageTk
@@ -583,17 +594,14 @@ class App(tk.Tk):
         self.apply_btn = ttk.Button(hd, text='Apply to mouse', style='Head.Accent.TButton', command=self.apply)
         self.dev_lbl = ttk.Label(hd, style='HeadMuted.TLabel', text='Looking for the mouse…')
         self.dev_lbl.pack(side='right')
-        self.mouse_box = ttk.Combobox(hd, state='readonly', width=18, style='Head.TCombobox')  # only with 2+ mice
-        self.mouse_box.bind('<<ComboboxSelected>>', self.on_pick_mouse)
+        self.mouse_pick = ttk.Frame(hd, style='Head.TFrame')  # only shown with 2+ mice plugged in
+        ttk.Label(self.mouse_pick, text='Mouse', style='HeadMuted.TLabel').pack(side='left', padx=(0, 8))
+        self.mouse_btn = ttk.Button(self.mouse_pick, style='Head.TButton', image=self._chevron, compound='right',
+                                    command=self.mouse_menu)
+        self.mouse_btn.pack(side='left')
         self._mice = []
         self.warn_lbl = ttk.Label(hd, style='HeadWarn.TLabel')  # shown while Razer Synapse is running
         self._synapse = []
-        self.menu = tk.Menu(self, tearoff=False, bg=PANEL, fg=FG, activebackground=SEL_FILL,
-                            activeforeground=ACCENT, disabledforeground=DIM, borderwidth=0)
-        for label, cmd in (('New profile', self.new), ('Rename', self.start_rename), ('Duplicate', self.duplicate),
-                           ('Export…', self.export_profile), ('Import…', self.import_profiles), (None, None),
-                           ('Reset all buttons', self.reset_all), ('Delete', self.delete)):
-            self.menu.add_separator() if label is None else self.menu.add_command(label=label, command=cmd)
 
         # top navigation: four equal sections
         nav = ttk.Frame(self, padding=(24, 0))
@@ -685,7 +693,7 @@ class App(tk.Tk):
         for i, (key, text) in enumerate(LIGHT_NAMES.items()):
             ttk.Radiobutton(row, text=text, value=key, variable=self.light_var, style='Seg.Toolbutton', width=9,
                             command=self.light_changed).grid(row=0, column=i, padx=(0 if i == 0 else 2, 0))
-        ttk.Button(row, text='Colour…', style='Field.TButton', command=self.pick_colour).grid(row=0, column=4, padx=(16, 0))
+        ttk.Button(row, text='Color…', style='Field.TButton', command=self.pick_colour).grid(row=0, column=4, padx=(16, 0))
         self.swatch = tk.Frame(row, width=round(22 * k), height=round(22 * k), bg=BG)
         self.swatch.grid(row=0, column=5, padx=(8, 0))
         row = ttk.Frame(self.light_box)
@@ -755,6 +763,13 @@ class App(tk.Tk):
 
         self.status = ttk.Label(self, style='Muted.TLabel')
         self.status.grid(row=4, column=0, sticky='w', padx=24, pady=(0, 16))
+        # the smallest window that fits every page (Lighting included); measured while all pages are stacked
+        self.light_box.pack(anchor='w', before=self.perf_note)
+        self.update_idletasks()
+        w, h = self.winfo_reqwidth(), self.winfo_reqheight()
+        self.light_box.pack_forget()
+        self.minsize(w, h)
+        self.geometry(f'{w}x{h}')  # a set size, so switching pages doesn't resize the window
         self.show_page('buttons')
 
     def _build_popover(self, parent):
@@ -797,6 +812,8 @@ class App(tk.Tk):
         self.saved_lbl = ttk.Label(foot, style='PopSmall.TLabel')
         self.saved_lbl.pack(side='right')
         self.pop_open = False
+        # the picture is centred, so it moves when the window is resized; move the editor with it
+        parent.bind('<Configure>', lambda e: self.pop_open and self.after_idle(self.open_popover))
 
     def open_popover(self):
         """Place the editor under the selected button's label, or above it when there's no room below."""
@@ -824,7 +841,8 @@ class App(tk.Tk):
 
     def show_page(self, key):
         self.close_popover()
-        self.pages[key].tkraise()
+        for name, page in self.pages.items():  # hidden pages are taken out so resizing doesn't redraw them
+            page.grid() if name == key else page.grid_remove()
         for name, (b, bar) in self.nav.items():
             b.configure(style='NavOn.TButton' if name == key else 'Nav.TButton')
             bar.configure(bg=ACCENT if name == key else BG)
@@ -840,10 +858,12 @@ class App(tk.Tk):
 
         def shape(name, states, outer, r=6):
             """states: [(state spec or None, fill, outline)], the plain look first."""
-            imgs = [rounded_image((2 * r + 8, 2 * r + 8), r, fill, outline, k) for _, fill, outline in states]
+            # Tk tiles the middle of the picture to fill the widget; a big middle means few tiles (fast resizing)
+            imgs = [rounded_image((2 * r + 200, 2 * r + 200), r, fill, outline, k) for _, fill, outline in states]
             self._round_imgs += imgs
+            small = round((2 * r + 8) * k)  # the size the element asks for, not the picture's size
             s.element_create(name, 'image', imgs[0], *[(st, im) for (st, _, _), im in zip(states[1:], imgs[1:])],
-                             border=round((r + 3) * k), padding=0, sticky='nsew')  # padding: the style's own
+                             border=round((r + 3) * k), padding=0, sticky='nsew', width=small, height=small)
             return outer
 
         def button(style, states, outer, kind='Button'):
@@ -866,10 +886,17 @@ class App(tk.Tk):
                'Toolbutton')
         button('PopSeg.Toolbutton', [(None, SIDE, None), ('selected', SEL_FILL, ACCENT_DIM), ('active', BG, None)], PANEL,
                'Toolbutton')
+        s.configure('Head.TButton', background=SIDE, focuscolor=SIDE, padding=(10, 3))  # mouse picker in the header
+        # drop-down menu rows (see popup)
+        button('Menu.TButton', [(None, PANEL, None), ('disabled', PANEL, None), ('active', hover, None)], PANEL)
+        s.configure('Menu.TButton', anchor='w', padding=(12, 6))
+        s.map('Menu.TButton', foreground=[('disabled', DIM)])
+        s.configure('On.Menu.TButton', foreground=ACCENT)  # the item that is picked now
 
         # fields: combobox, spinbox, entry. Arrow element names must end in downarrow/uparrow for Tk's bindings.
         down, up = chevron_image(False, MUTED, k), chevron_image(True, MUTED, k)
         self._round_imgs += [down, up]
+        self._chevron = down
         s.element_create('Round.downarrow', 'image', down, sticky='', width=round(24 * k))
         s.element_create('Spin.uparrow', 'image', up, sticky='', width=round(20 * k), height=round(12 * k))
         s.element_create('Spin.downarrow', 'image', down, sticky='', width=round(20 * k), height=round(12 * k))
@@ -929,7 +956,7 @@ class App(tk.Tk):
     def _draw_mouse(self):
         c = self.canvas
         c.delete('all')
-        self.labels, self._overlays = {}, {}
+        self.labels, self._overlays, self._base = {}, {}, None  # a new model needs its picture rendered again
         self._draw_line_art()
         self._draw_labels()
         c.scale('all', 0, 0, self.k, self.k)
@@ -1225,12 +1252,51 @@ class App(tk.Tk):
 
     def profile_menu(self):
         """The ⋯ menu next to the profile picker. Default only offers New and Import."""
-        locked = self.current == 'default'
-        for label in ('Rename', 'Duplicate', 'Export…', 'Reset all buttons', 'Delete'):
-            self.menu.entryconfigure(label, state='disabled' if locked else 'normal')
-        x = self.profile_box.winfo_rootx()
-        y = self.profile_box.winfo_rooty() + self.profile_box.winfo_height()
-        self.menu.tk_popup(x, y)
+        own = self.current != 'default'
+        self.popup(self.profile_box, [
+            ('New profile', self.new, True), ('Rename', self.start_rename, own), ('Duplicate', self.duplicate, own),
+            ('Export…', self.export_profile, own), ('Import…', self.import_profiles, True), None,
+            ('Reset all buttons', self.reset_all, own), ('Delete', self.delete, own)])
+
+    def mouse_menu(self):
+        shown = self.model['pids'][0]
+        self.popup(self.mouse_btn, [(name, lambda pid=pid: self.on_pick_mouse(pid), True, pid == shown)
+                                    for pid, name in self._mice])
+
+    def popup(self, under, items):
+        """Rounded drop-down menu under a widget. items: (text, command, enabled[, picked]), or None for a divider.
+        Closes on a pick, Esc, or a click anywhere else."""
+        k = self.k
+        top = tk.Toplevel(self, bg=PANEL, padx=round(4 * k), pady=round(4 * k))
+        top.overrideredirect(True)
+        top.attributes('-topmost', True)
+        for item in items:
+            if item is None:
+                tk.Frame(top, height=1, bg=LINE).pack(fill='x', padx=round(8 * k), pady=round(4 * k))
+                continue
+            text, cmd, on, picked = (*item, False)[:4]
+            b = ttk.Button(top, text=text, style='On.Menu.TButton' if picked else 'Menu.TButton',
+                           command=lambda c=cmd: (top.destroy(), c()))
+            b.pack(fill='x')
+            b.state(['!disabled'] if on else ['disabled'])
+        top.update_idletasks()
+        w = max(top.winfo_reqwidth(), under.winfo_width())
+        x = min(under.winfo_rootx(), self.winfo_rootx() + self.winfo_width() - w)  # stay inside the window
+        top.geometry(f'{w}x{top.winfo_reqheight()}+{x}+{under.winfo_rooty() + under.winfo_height() + round(4 * k)}')
+        round_corners(top)
+
+        def gone(_=None):
+            if not top.winfo_exists():
+                return
+            try:
+                f = self.focus_get()
+            except KeyError:  # focus in a widget Tk doesn't wrap, such as a combobox list
+                f = None
+            if not (f and str(f).startswith(str(top))):
+                top.destroy()
+        top.bind('<Escape>', lambda e: top.destroy())
+        top.bind('<FocusOut>', lambda e: top.after(1, gone))
+        top.focus_force()
 
     def save(self):
         if self.current == 'default':
@@ -1436,20 +1502,30 @@ class App(tk.Tk):
         """Show the mouse picker only while more than one Razer mouse is plugged in."""
         self._mice = found
         if len(found) < 2:
-            return self.mouse_box.pack_forget()
-        self.mouse_box.configure(values=[name for _, name in found])
+            return self.mouse_pick.pack_forget()
         names = dict(found)
-        self.mouse_box.set(names.get(self.mouse.pid) or names.get(self.model['pids'][0], found[0][1]))
-        self.mouse_box.pack(side='right', padx=(12, 0), before=self.dev_lbl)
+        name = names.get(self.mouse.pid) or names.get(self.model['pids'][0], found[0][1])
+        self.mouse_btn.configure(text=name + '   ')  # room before the arrow
+        self.mouse_pick.pack(side='right', padx=(20, 0), before=self.dev_lbl)
 
-    def on_pick_mouse(self, _=None):
-        pid = self._mice[self.mouse_box.current()][0]
-        self.mouse_box.selection_clear()
-        if pid in self.model['pids']:  # already the one shown
+    def _use_model(self, model):
+        """A different mouse: rebuild the picture and button list for it."""
+        if model['name'] == self.model['name']:
+            return
+        self.close_popover()
+        self.model = model
+        self.buttons, self.editable = model['buttons'], rs.editable(model)
+        self.sel = self.sel if self.sel in self.editable else self.editable[0]
+        self._draw_mouse()
+        self.load_profile(self.current)
+
+    def on_pick_mouse(self, pid):
+        if pid == (self.mouse.pid or self.model['pids'][0]):  # already the picked one
             return
         self.cfg['mouse'] = pid
         self.write_cfg()
         self.mouse.choose(pid)
+        self._use_model(rs.model_for(pid, dict(self._mice).get(pid, '')))  # even before it answers (it may be asleep)
         self._connected = False  # _device_done then redraws the buttons for the newly picked model
         self.dev_lbl.configure(text='Switching mouse…')
         self.refresh_device(repeat=False)
@@ -1556,12 +1632,7 @@ class App(tk.Tk):
         if self.tray:
             self.tray.title = f'FreeRazer · battery {level}%'
         if self._connected is False:  # back after being unplugged
-            if model['name'] != self.model['name']:  # a different mouse: rebuild the picture and button list for it
-                self.model = model
-                self.buttons, self.editable = model['buttons'], rs.editable(model)
-                self.sel = self.sel if self.sel in self.editable else self.editable[0]
-                self._draw_mouse()
-                self.load_profile(self.current)
+            self._use_model(model)
             self._failed = None  # let auto-switch retry a profile that failed while it was away
             self.read_mouse()
         self._connected = True
@@ -1606,7 +1677,7 @@ class App(tk.Tk):
 
     def pick_colour(self):
         from tkinter import colorchooser
-        rgb = colorchooser.askcolor('#%02x%02x%02x' % self._rgb, parent=self, title='Light colour')[0]
+        rgb = colorchooser.askcolor('#%02x%02x%02x' % self._rgb, parent=self, title='Light color')[0]
         if not rgb:
             return
         self._rgb = tuple(int(c) for c in rgb)
