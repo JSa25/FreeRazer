@@ -8,7 +8,9 @@ $version = [regex]::Match((Get-Content freerazer.pyw -Raw), "APP_VERSION = '([\d
 if (-not $version) { throw 'APP_VERSION not found in freerazer.pyw' }
 "Building FreeRazer $version"
 
-py -3.13 razer_switch.py test
+# the Python to build with: $env:PYTHON if set (the GitHub release workflow sets it), else the py launcher's 3.13
+$py, $pyArgs = if ($env:PYTHON) { $env:PYTHON, @() } else { 'py', @('-3.13') }
+& $py @pyArgs razer_switch.py test
 if ($LASTEXITCODE) { throw 'self-check failed' }
 
 # Only modules proven unused (none load in a run that uses every feature). Do NOT exclude bz2, lzma, decimal,
@@ -19,12 +21,13 @@ $exclude = 'numpy PIL._avif PIL._webp PIL._imagingcms PIL.ImageCms PIL.AvifImage
 $excludeArgs = $exclude.Split(' ') | ForEach-Object { '--exclude-module', $_ }
 $icon = Join-Path $PSScriptRoot 'icon.ico'  # absolute: PyInstaller resolves relative paths from --specpath
 $db = Join-Path $PSScriptRoot 'devices.json'  # the mouse database the exe starts with
-py -3.13 -m PyInstaller --onefile --windowed --name 'FreeRazer' --icon $icon --add-data "$icon;." --add-data "$db;." `
+& $py @pyArgs -m PyInstaller --onefile --windowed --name 'FreeRazer' --icon $icon --add-data "$icon;." --add-data "$db;." `
     --paths $PSScriptRoot --hidden-import razer_switch --hidden-import pystray._win32 @excludeArgs `
     --distpath dist --workpath build --specpath build --noconfirm --clean freerazer.pyw
 if ($LASTEXITCODE) { throw 'PyInstaller failed' }
 
-$iscc = @("$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe", "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe") |
+$iscc = @("$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe", "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+          "$env:ProgramFiles\Inno Setup 6\ISCC.exe") |
     Where-Object { Test-Path $_ } | Select-Object -First 1
 if (-not $iscc) { throw 'Inno Setup 6 not found (winget install JRSoftware.InnoSetup)' }
 & $iscc /Q "/DAppVersion=$version" freerazer.iss

@@ -197,11 +197,7 @@ powershell -ExecutionPolicy Bypass -File build.ps1
 
 **Installing:** run `FreeRazerSetup.exe`. It installs for the current user only (no admin) into `%LOCALAPPDATA%\Programs\FreeRazer`, adds a Start menu entry so Windows search finds it, and lists it under Settings > Apps > Installed apps, where Uninstall removes it again. Running a newer Setup upgrades in place.
 
-**Releasing an update:** bump `APP_VERSION`, run `build.ps1`, then:
-
-```bash
-powershell -ExecutionPolicy Bypass -File release.ps1 -Notes "What changed"
-```
+**Releasing an update:** bump `APP_VERSION` and push, then run the **Release** workflow from the Actions tab with the release notes. It builds the installer on GitHub from the code in the repo and publishes it.
 
 Installed copies check GitHub Releases at most once a day (or when you click Check for updates in Settings or the tray menu) and ask before updating; the pop-up never appears while a linked game is in focus. On Update now they download `FreeRazerSetup.exe`, check it against the published `.sha256`, and install it silently.
 
