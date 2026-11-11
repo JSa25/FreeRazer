@@ -134,7 +134,7 @@ Names and USB product IDs from [OpenRazer](https://github.com/openrazer/openraze
 
 </details>
 
-Mouse not listed? See [Adding a mouse](#adding-a-mouse).
+Mouse not listed? [Here's how to get it added](#mouse-not-listed).
 
 The app only reads and sets button bindings, DPI, polling rate, power saving (sleep timer, low power level) and lighting; it never touches firmware. What it may change on each mouse comes from its mouse database, see [How mice are supported](#how-mice-are-supported).
 
@@ -213,7 +213,7 @@ Installed copies check GitHub Releases at most once a day (or when you click Che
 
 The Viper V4 Pro and DeathAdder V2 Pro were also tested by hand here and have their own entries in `DEVICES` in `razer_switch.py`.
 
-## Adding a mouse
+## Mouse not listed?
 
 For a Razer mouse that isn't in the [supported mice](#supported-mice) list. The list comes from OpenRazer, so once OpenRazer supports a new mouse it reaches FreeRazer by itself within a week. To get one added sooner, or one OpenRazer doesn't have, you need the mouse and a few minutes. Nothing is written to the mouse.
 
