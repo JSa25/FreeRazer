@@ -128,10 +128,21 @@ def build(c_src, h_src, py_src):
 
 
 if __name__ == '__main__':
-    c, h, py = (open(p, encoding='utf-8', errors='replace').read() for p in sys.argv[1:4])
+    c, h, py = (open(p, encoding='utf-8-sig', errors='replace').read() for p in sys.argv[1:4])
     db = build(c, h, py)
     out = sys.argv[4] if len(sys.argv) > 4 else os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                                                              'devices.json')
+    try:
+        with open(out, encoding='utf-8') as f:
+            old = json.load(f)
+    except (OSError, ValueError):
+        old = None
+    if old and {k: v for k, v in old.items() if k != 'version'} == {k: v for k, v in db.items() if k != 'version'}:
+        print(f'no change: {len(db["mice"])} mice, same as {out}')
+        sys.exit(0)
+    # OpenRazer reorganising its source could make the parse find far fewer mice; never publish that
+    if old and len(db['mice']) < 0.9 * len(old['mice']):
+        sys.exit(f'refusing: {len(db["mice"])} mice found, {out} has {len(old["mice"])} (did the source format change?)')
     with open(out, 'w', encoding='utf-8') as f:
         json.dump(db, f, indent=1)
     n = len(db['mice'])

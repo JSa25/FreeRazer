@@ -12,6 +12,8 @@ foreach ($f in 'dist\FreeRazerSetup.exe', 'dist\FreeRazerSetup.exe.sha256') {
 $hash = (Get-FileHash dist\FreeRazerSetup.exe -Algorithm SHA256).Hash.ToLower()
 if ((Get-Content dist\FreeRazerSetup.exe.sha256 -Raw).Split(' ')[0] -ne $hash) { throw 'checksum file is stale: rebuild' }
 
+git pull --rebase origin master  # the weekly mouse database update may have committed devices.json
+if ($LASTEXITCODE) { throw 'git pull failed: sort it out, then run this again' }
 git push origin HEAD
 gh release create "v$version" dist\FreeRazerSetup.exe dist\FreeRazerSetup.exe.sha256 `
     --title "FreeRazer $version" --notes $Notes

@@ -1,0 +1,48 @@
+# Rebuilds devices.json (the mouse database) from OpenRazer's latest source every Monday and commits it if any
+# mouse changed. Installed copies pick it up with their daily check. Can also be run by hand from the Actions tab.
+name: Update mouse database
+
+on:
+  schedule:
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    runs-on: windows-latest  # the self-check imports the Windows-only parts of razer_switch.py
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Download OpenRazer's driver and device list
+        shell: bash
+        run: |
+          mkdir openrazer
+          base=https://raw.githubusercontent.com/openrazer/openrazer/master
+          curl -fsSL -o openrazer/razermouse_driver.c $base/driver/razermouse_driver.c
+          curl -fsSL -o openrazer/razermouse_driver.h $base/driver/razermouse_driver.h
+          curl -fsSL -o openrazer/mouse.py $base/daemon/openrazer_daemon/hardware/mouse.py
+
+      - name: Rebuild devices.json
+        run: python tools/gen_devices.py openrazer/razermouse_driver.c openrazer/razermouse_driver.h openrazer/mouse.py
+
+      - name: Self-check (includes checking devices.json the way the app does)
+        run: |
+          python -m pip install --quiet hidapi
+          python razer_switch.py test
+
+      - name: Commit if any mouse changed
+        shell: bash
+        run: |
+          if git diff --quiet -- devices.json; then echo "No change."; exit 0; fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add devices.json
+          git commit -m "Mouse database: update from OpenRazer"
+          git push

@@ -2054,17 +2054,19 @@ class App(tk.Tk):
         v = str(self.db['version']) if self.db else ''
         self.db_lbl.configure(text=f'{len(rs.DB)} mice · from {v[:4]}-{v[4:6]}-{v[6:8]}' if self.db else 'Not loaded')
 
-    def update_db(self):
-        """Download the newest mouse database from the repo; it is checked in full before it is used or saved."""
+    def update_db(self, manual=True):
+        """Download the newest mouse database from the repo; it is checked in full before it is used or saved.
+        The daily check (manual=False) only says something when the database changed."""
         import threading
         self.db_lbl.configure(text='Checking…')
+        say = self.set_status if manual else lambda text: None
 
         def work():
             try:
                 db = json.loads(_curl(DB_URL, timeout=30))
                 rs.check_db(db)
                 if self.db and db['version'] <= self.db['version']:
-                    return self._q.put(lambda: (self.show_db(), self.set_status('The mouse database is up to date.')))
+                    return self._q.put(lambda: (self.show_db(), say('The mouse database is up to date.')))
                 path = rs.db_paths()[1]
                 with open(path + '.new', 'w', encoding='utf-8') as f:
                     json.dump(db, f)
@@ -2072,7 +2074,7 @@ class App(tk.Tk):
                 self._q.put(lambda: self._db_done(db))
             except (OSError, ValueError) as e:
                 msg = f'Could not update the mouse database: {e}'
-                self._q.put(lambda: (self.show_db(), self.set_status(msg)))
+                self._q.put(lambda: (self.show_db(), say(msg)))
         threading.Thread(target=work, daemon=True).start()
 
     def _db_done(self, db):
@@ -2103,6 +2105,7 @@ class App(tk.Tk):
             self.after(6 * 3600_000, self.check_updates)
             if not self.cfg.get('auto_update', True) or time.time() - self.cfg.get('update_checked', 0) < 86400:
                 return
+            self.update_db(manual=False)  # new mice from the weekly database rebuild, once a day with the app check
         self.update_lbl.configure(text='Checking…')
 
         def work():
