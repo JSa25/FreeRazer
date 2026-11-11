@@ -28,7 +28,7 @@ PROFILE = 0x01  # the only profile slot web Synapse wrote to
 ALL_FEATURES = ('battery', 'dpi', 'stages', 'poll', 'sleep', 'low_power', 'light')
 DEVICES = [
     {'name': 'Viper V4 Pro', 'pids': (0x00E6,),  # dongle and cable report the same PID
-     'txn': 0x1F, 'verified': True, 'drawing': 'viper-v4-pro', 'low_power_max': 100,
+     'txn': 0x1F, 'verified': True, 'drawing': 'viper-v4-pro', 'low_power_max': 100, 'hypershift': True,
      'features': {'battery', 'dpi', 'stages', 'poll', 'sleep', 'low_power'},
      'buttons': {  # id: (label as Synapse names it, factory action)
          1: ('Left Click', 'mouse:left'),
@@ -132,9 +132,23 @@ def has(model, feature):
     return feature in model.get('features', ())
 
 
+HS = 0x100  # button ID + HS = that button on the HyperShift layer (byte 2 of 02/0C and 02/8C is the layer)
+
+
 def editable(model):
-    """Buttons a profile may change. Left click stays left click, so you can't lock yourself out."""
-    return [b for b in model['buttons'] if b != 1]
+    """Buttons a profile may change. Left click stays left click, so you can't lock yourself out. A model with
+    HyperShift also has each of them on the HyperShift layer, as ID + HS."""
+    ids = [b for b in model['buttons'] if b != 1]
+    return ids + [b + HS for b in ids] if model.get('hypershift') else ids
+
+
+def factory(model, b):
+    """Factory action of button b on either layer (the HyperShift layer starts as a copy of the standard one)."""
+    return model['buttons'][b & 0xFF][1]
+
+
+def label(model, b):
+    return model['buttons'][b & 0xFF][0] + (' (HyperShift)' if b & HS else '')
 
 
 def mice():
@@ -180,8 +194,8 @@ NAMES = {v: k for k, v in KEYS.items()}
 # modifier byte before the key code, captured from web Synapse: Ctrl+5 -> 01, Shift+Alt+5 -> 06
 MODS = {'ctrl': 0x01, 'shift': 0x02, 'alt': 0x04}
 
-ACTIONS = [f'mouse:{m}' for m in MOUSE] + ['dpi:cycleup'] + list(KEYS)
-_PRETTY = {'mouse:left': 'Left Click', 'mouse:right': 'Right Click', 'mouse:middle': 'Scroll Click',
+ACTIONS = [f'mouse:{m}' for m in MOUSE] + ['dpi:cycleup', 'hypershift'] + list(KEYS)
+_PRETTY = {'hypershift': 'Razer HyperShift', 'mouse:left': 'Left Click', 'mouse:right': 'Right Click', 'mouse:middle': 'Scroll Click',
            'mouse:back': 'Mouse Button 4', 'mouse:forward': 'Mouse Button 5', 'mouse:scrollup': 'Scroll Up',
            'mouse:scrolldown': 'Scroll Down', 'dpi:cycleup': 'Cycle Up Sensitivity Stages', 'pageup': 'Page Up',
            'pagedown': 'Page Down', 'capslock': 'Caps Lock', 'ctrl': 'Left Ctrl', 'shift': 'Left Shift',
@@ -208,6 +222,8 @@ def encode(action):
         return 0x01, [MOUSE[action[6:]]]
     if action == 'dpi:cycleup':
         return 0x06, [0x06]  # as read back from the DPI button
+    if action == 'hypershift':
+        return 0x0C, [0x01]  # as read back after web Synapse made Mouse Button 5 the HyperShift key
     if action in KEYS:
         return 0x02, [0x00, KEYS[action]]  # 00 = no modifier keys
     *mods, key = action.split('+')
@@ -289,29 +305,34 @@ def packet(cls, cmd, args, txn, size=0x0A):
 
 
 def read_packet(button, txn):
-    return packet(0x02, 0x8C, [PROFILE, button, 0], txn)  # 0x8C: high bit set = read
+    return packet(0x02, 0x8C, [PROFILE, button & 0xFF, button >> 8], txn)  # 0x8C: high bit set = read
 
 
 def set_packet(button, action, txn):
     kind, payload = encode(action)
-    # args: profile, button, hypershift (0 = off), action type, payload length, payload
-    return packet(0x02, 0x0C, [PROFILE, button, 0x00, kind, len(payload), *payload], txn)
+    # args: profile, button, layer (0 standard, 1 HyperShift), action type, payload length, payload
+    return packet(0x02, 0x0C, [PROFILE, button & 0xFF, button >> 8, kind, len(payload), *payload], txn)
 
 
 def resolve(default, own=None, model=DEVICES[0]):
     """Full binding {button: action}: factory, then the default profile, then this profile.
     Buttons the model doesn't have are left out, so one profile works across models."""
-    buttons = model['buttons']
-    out = {b: buttons[b][1] for b in editable(model)}
+    out = {b: factory(model, b) for b in editable(model)}
     for layer in (default, own or {}):
         for b, action in layer.items():
             b = int(b)
-            if b == 1:
+            if b & 0xFF == 1:
                 raise ValueError('left click cannot be changed')
             if b in out:
                 # written the way the mouse reads it back ('shift+ctrl+5' -> 'ctrl+shift+5'), so a profile
                 # compares equal to what is on the mouse
-                out[b] = buttons[b][1] if action == 'default' else decode(*encode(action))
+                out[b] = factory(model, b) if action == 'default' else decode(*encode(action))
+    # the HyperShift key is the HyperShift key on both layers (as Synapse leaves it); nothing else is
+    for b, action in out.items():
+        if action == 'hypershift' and (not model.get('hypershift') or b & HS):
+            out[b] = factory(model, b)
+    for b in [b for b in out if not b & HS and out[b] == 'hypershift']:
+        out[b + HS] = 'hypershift'
     return out
 
 
@@ -429,7 +450,7 @@ class Mouse:
                 self._connect()
                 key = bytes(pkt[6:8])
                 # the one place packets go out: anything but a read must be an allowed button or setting
-                if not pkt[7] & 0x80 and not ((key == b'\x02\x0c' and pkt[9] in self.writable()) or (
+                if not pkt[7] & 0x80 and not ((key == b'\x02\x0c' and pkt[9] + (pkt[10] << 8) in self.writable()) or (
                         key in SETTING_WRITES and has(self.model, SETTING_WRITES[key])
                         and (pkt[6] != 0x0F or pkt[9] in self.model.get('leds', ())))):
                     raise ValueError(f'refusing to send command {pkt[6]:02x}/{pkt[7]:02x} to {self.model["name"]}')
@@ -634,8 +655,8 @@ class Mouse:
 
 
 def describe(binding, model=DEVICES[0]):
-    buttons = model['buttons']
-    changed = [f'{buttons[b][0]} = {pretty(a)}' for b, a in binding.items() if a != buttons[b][1]]
+    changed = [f'{label(model, b)} = {pretty(a)}' for b, a in binding.items()
+               if a != factory(model, b) and not (b & HS and a == 'hypershift')]  # the key shows once
     return ', '.join(changed) or 'factory bindings'
 
 
@@ -871,12 +892,33 @@ def test():
     # a profile made on one model applies to another without the buttons it lacks
     assert resolve({}, {'96': 'f5', '4': 'e'}, other) == {**resolve({}, None, other), 4: 'e'}
 
+    # HyperShift, as read back after web Synapse set Mouse Button 5 = HyperShift and HyperShift layer button 4 = F9
+    assert decode(0x0C, b'\x01') == 'hypershift' and decode(0x02, b'\x00\x42') == 'f9'
+    assert set_packet(4 + HS, 'f10', 0x1F)[8:15].hex(' ') == '01 04 01 02 02 00 43'
+    assert read_packet(4 + HS, 0x1F)[8:11].hex(' ') == '01 04 01'
+    full = resolve({}, {'5': 'hypershift', str(4 + HS): 'f9'}, v4)
+    assert full[5] == full[5 + HS] == 'hypershift' and full[4 + HS] == 'f9' and full[4] == 'mouse:back'
+    assert len(full) == 14 and 1 + HS not in full
+    assert describe(full, v4) == 'Mouse Button 5 = Razer HyperShift, Mouse Button 4 (HyperShift) = F9'
+    # HyperShift on the HyperShift layer only (no key on the standard one), or on a mouse without it: factory
+    assert resolve({}, {str(3 + HS): 'hypershift'}, v4)[3 + HS] == 'mouse:middle'
+    assert resolve({}, {'5': 'hypershift', str(4 + HS): 'f9'}, other) == resolve({}, None, other)
+    for bad in (str(1 + HS),):
+        try:
+            resolve({}, {bad: 'f5'}, v4)
+            raise AssertionError('left click must be locked on the HyperShift layer too')
+        except ValueError:
+            pass
+
     # write guards, on a fake device so no mouse is touched
     m = Mouse()
     m.dev, m.model, m.txn = _FakeDev(), v4, 0x1F
     m.set_action(5, 'f7')
     assert m.dev.sent[-1] == bytes(cap)
-    for bad in (lambda: m.set_action(1, 'f7'), lambda: m.set_action(6, 'f7'),
+    m.set_action(4 + HS, 'f9')
+    assert m.dev.sent[-1][8:15].hex(' ') == '01 04 01 02 02 00 42'
+    for bad in (lambda: m.set_action(1, 'f7'), lambda: m.set_action(6, 'f7'), lambda: m.set_action(1 + HS, 'f7'),
+                lambda: m.call(packet(0x02, 0x0C, [1, 4, 2, 2, 2, 0, 0x42], 0x1F)),  # no layer 2
                 lambda: m.call(packet(0x0F, 0x03, [], 0x1F)),  # any other write-type command (Synapse's lighting frame)
                 lambda: m.call(packet(0x0F, 0x02, [1, 4, 0], 0x1F)),  # lighting on a model with no known LED
                 lambda: m.set_lighting('off'),
@@ -903,6 +945,12 @@ def test():
     assert m.dev.sent[-1][5:10].hex(' ') == '02 00 40 01 10' and m.polling_rates()[-1] == 8000
     da = model_for(0x007D)
     assert da['verified'] and set(da['buttons']) == {1, 2, 3, 4, 5, 9, 10}
+    m.model, m.dev = da, _FakeDev()
+    try:
+        m.set_action(4 + HS, 'f9')  # HyperShift only where it was checked on the mouse
+        raise AssertionError('HyperShift layer written on a mouse without it')
+    except ValueError:
+        assert not m.dev.sent
     m.model, m.poll_table, m.dev = da, None, _FakeDev(refuse={(0x00, 0xC0)})
     m.set_polling(500)
     assert m.poll_table is POLL_HZ_CLASSIC and m.polling_rates() == [125, 500, 1000]

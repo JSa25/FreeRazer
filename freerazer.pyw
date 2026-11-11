@@ -503,6 +503,7 @@ class App(tk.Tk):
         self.buttons, self.editable = self.model['buttons'], self.editable_for(self.model)
         migrate_startup()
         self.current, self.sel, self.edit, self.recording = 'default', 5, {}, False
+        self.layer = 0  # 0 = standard buttons, rs.HS = the HyperShift layer
         if self.sel not in self.buttons or self.sel == 1 or (self.editable and self.sel not in self.editable):
             self.sel = (self.editable or [b for b in self.buttons if b != 1])[0]
         self._set_icon()
@@ -562,10 +563,35 @@ class App(tk.Tk):
         return {b: a for b, a in full.items() if b in self.editable}
 
     def effective(self, b):
-        """(action, where it comes from) for button b in the profile being edited."""
-        if str(b) in self.edit and self.edit[str(b)] != 'default':
-            return self.edit[str(b)], 'Changed in this profile'
+        """(action, where it comes from) for button b, on the layer shown, in the profile being edited."""
+        if self.layer and self.hs_key(b):
+            return 'hypershift', 'Hold it to use the HyperShift buttons'
+        key = str(b + self.layer)
+        if key in self.edit and self.edit[key] != 'default':
+            return self.edit[key], 'Changed in this profile'
         return self.buttons[b][1], 'Factory setting'
+
+    def hs_key(self, b):
+        """Button b is the HyperShift key in the profile being edited."""
+        return bool(self.model.get('hypershift')) and self.edit.get(str(b)) == 'hypershift'
+
+    def show_layer_row(self):
+        if self.model.get('hypershift'):
+            self.layer_row.place(in_=self.canvas, relx=0.5, rely=1.0, y=4, anchor='n')
+        else:
+            self.layer_row.place_forget()
+            self.layer_var.set(0)
+            self.layer = 0
+
+    def set_layer(self):
+        self.close_popover()
+        self.layer = self.layer_var.get()
+        self.redraw()
+        if self.layer and not any(self.hs_key(b) for b in self.buttons):
+            self.set_status('No button is the HyperShift key in this profile yet. On Standard, pick a button and '
+                            'set it to Mouse > Razer HyperShift.')
+        elif self.layer:
+            self.set_status('HyperShift: these actions work while you hold the HyperShift key.')
 
     def _set_icon(self):
         # the icon file is packed inside the exe (unpacked to _MEIPASS); as a script it sits next to this file
@@ -804,6 +830,13 @@ class App(tk.Tk):
         for key, step in (('<Up>', -1), ('<Left>', -1), ('<Down>', 1), ('<Right>', 1)):
             self.canvas.bind(key, lambda e, s=step: self.step_sel(s))
         self._draw_mouse()
+        # Standard / HyperShift, under the picture on a mouse with HyperShift; placed, so the page keeps its size
+        self.layer_row = ttk.Frame(pg)
+        self.layer_var = tk.IntVar(value=0)
+        for i, (val, txt) in enumerate(((0, 'Standard'), (rs.HS, 'HyperShift'))):
+            ttk.Radiobutton(self.layer_row, text=txt, value=val, variable=self.layer_var, style='Seg.Toolbutton',
+                            width=11, command=self.set_layer).pack(side='left', padx=(0 if i == 0 else 2, 0))
+        self.show_layer_row()
         self._build_popover(pg)
 
         # Performance: sensitivity and polling rate together
@@ -1325,8 +1358,8 @@ class App(tk.Tk):
     def redraw(self):
         c = self.canvas
         for b, (text,) in self.labels.items():
-            editable, sel = b in self.editable, b == self.sel
-            action = self.effective(b)[0] if editable else self.buttons[b][1]
+            editable, sel = b in self.editable and not (self.layer and self.hs_key(b)), b == self.sel
+            action = self.effective(b)[0] if b in self.editable else self.buttons[b][1]
             # like Synapse: green = remapped, white = factory, dim = can't change
             color = DIM if not editable else ACCENT if action != self.buttons[b][1] else FG
             shown = rs.pretty(action) if b in LABELS else f'{self.buttons[b][0]}:  {rs.pretty(action)}'  # no line to it
@@ -1334,12 +1367,13 @@ class App(tk.Tk):
                             font=('Segoe UI Semibold', 10) if sel else FONT)
         self.show_art()
         action, source = self.effective(self.sel)
-        self.btn_name.configure(text=self.buttons[self.sel][0])
+        self.btn_name.configure(text=rs.label(self.model, self.sel + self.layer))
         self.action_lbl.configure(text=rs.pretty(action),
                                   style='PopBigOn.TLabel' if action != self.buttons[self.sel][1] else 'PopBig.TLabel')
         self.source_lbl.configure(text=source)
         if not self.recording:
-            self.mode_var.set('mouse' if action.startswith('mouse:') else 'dpi' if action.startswith('dpi:') else 'key')
+            self.mode_var.set('mouse' if action.startswith('mouse:') or action == 'hypershift' else
+                              'dpi' if action.startswith('dpi:') else 'key')
         self.show_mode()
 
     def show_mode(self):
@@ -1352,14 +1386,15 @@ class App(tk.Tk):
         mode = self.mode_var.get()
         if mode == 'key':
             return self.rec_btn.pack(fill='both', expand=True)
-        self.pick_items = MOUSE_CHOICES if mode == 'mouse' else DPI_CHOICES
+        self.pick_items = DPI_CHOICES if mode == 'dpi' else MOUSE_CHOICES + (
+            ['hypershift'] if self.model.get('hypershift') and not self.layer else [])  # the key lives on Standard
         self.pick_box['values'] = [rs.pretty(a) for a in self.pick_items]
         current = self.effective(self.sel)[0]
         self.pick_box.set(rs.pretty(current) if current in self.pick_items else 'Choose…')
         self.pick_box.pack(fill='x', pady=(8, 0))
 
     def select(self, b):
-        if b not in self.editable:  # the editor only opens for a button that can be changed
+        if b not in self.editable or self.layer and self.hs_key(b):  # the editor only opens for a button that can be changed
             return self.locked(b)
         self.stop_record()
         self.sel = b
@@ -1368,11 +1403,13 @@ class App(tk.Tk):
 
     def step_sel(self, step):
         """Arrow keys on the picture: the next changeable button."""
-        ids = self.editable
+        ids = [b for b in self.editable if b in self.buttons and not (self.layer and self.hs_key(b))]
         if ids:
             self.select(ids[((ids.index(self.sel) if self.sel in ids else -1) + step) % len(ids)])
 
     def locked(self, b):
+        if self.layer and self.hs_key(b):
+            return self.set_status(f'{self.buttons[b][0]} is your HyperShift key. Change it on Standard.')
         self.set_status('Left click is locked so you can always click.' if b == 1 else
                         f'{self.buttons[b][0]} can\'t be changed on this mouse: it didn\'t answer with its factory '
                         'setting. Reset the mouse to factory settings in Razer Synapse to unlock it.')
@@ -1381,10 +1418,11 @@ class App(tk.Tk):
     def set_action(self, b, action):
         if self.current == 'default':
             return  # default stays factory
+        key = str(b + self.layer)
         if action is None or action == self.buttons[b][1]:
-            self.edit.pop(str(b), None)  # factory
+            self.edit.pop(key, None)  # factory
         else:
-            self.edit[str(b)] = action
+            self.edit[key] = action
         self.save()
         self.redraw()
 
@@ -1790,6 +1828,7 @@ class App(tk.Tk):
         self.close_popover()
         self.model = model
         self.buttons = model['buttons']
+        self.show_layer_row()
         self.set_editable(self.editable_for(model))
         w, h = self._min_size  # a mouse with More buttons needs a taller window
         h += round((self.extra_height() - H) * self.k)
@@ -2401,7 +2440,8 @@ def import_file(path, profiles):
             raise ValueError(f'bad profile {name!r}')
         own = {}
         for b, action in binding.items():
-            if not isinstance(b, str) or not b.isdigit() or not 2 <= int(b) <= 255:
+            # a button ID, or one + rs.HS for the HyperShift layer
+            if not isinstance(b, str) or not b.isdigit() or not 2 <= int(b) & 0xFF or int(b) >= 2 * rs.HS:
                 raise ValueError(f'"{name}" has a button that isn\'t one ({b!r}); left click can\'t be changed')
             # stored the way the mouse reads it back, so it compares equal to what is on the mouse;
             # rs.encode raises ValueError for anything that is not a known action
