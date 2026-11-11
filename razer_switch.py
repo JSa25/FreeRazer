@@ -440,7 +440,7 @@ class Mouse:
             return None
         a = self.call(packet(0x0F, 0x82, [0x01, led], self.txn, size=0x0C))[8:]
         b = self.call(packet(0x0F, 0x84, [0x01, led], self.txn, size=0x03))[8:]
-        effect = {v: k for k, v in LIGHT_EFFECTS.items()}.get(a[2], 'spectrum')
+        effect = {v: k for k, v in LIGHT_EFFECTS.items()}.get(a[2], 'other')  # e.g. Synapse's own custom frames
         return effect, tuple(a[6:9]), byte_to_percent(b[2])
 
     def set_lighting(self, effect, rgb=(0, 255, 0)):
@@ -473,7 +473,7 @@ OLD_APP_DIR = 'MouseProfiles'  # this app's folder before it was renamed FreeRaz
 
 def profiles_path(legacy_dir=None):
     """%APPDATA%\\FreeRazer\\profiles.json. On first run, copies over what an older version left: the whole
-    %APPDATA%\\MouseProfiles folder (profiles, update token), or else a profiles.json next to the exe or
+    %APPDATA%\\MouseProfiles folder (profiles), or else a profiles.json next to the exe or
     script. The old copies are left in place as a backup."""
     appdata = os.environ.get('APPDATA') or os.path.expanduser('~')
     folder = os.path.join(appdata, APP_DIR)

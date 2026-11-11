@@ -219,7 +219,7 @@ Names and USB product IDs from [OpenRazer](https://github.com/openrazer/openraze
 
 </details>
 
-The app only reads and sets button bindings, DPI, polling rate and power saving (sleep timer, low power level); it never touches firmware or lighting.
+The app only reads and sets button bindings, DPI, polling rate, power saving (sleep timer, low power level) and, on mice where it has been tested (so far the DeathAdder V2 Pro), lighting; it never touches firmware.
 
 Want your mouse supported? See [Adding a mouse](#adding-a-mouse).
 
@@ -228,7 +228,11 @@ Want your mouse supported? See [Adding a mouse](#adding-a-mouse).
 - Remap any button except left click (so you can't lock yourself out): other mouse buttons, keys, key combos such as Ctrl + S, or DPI cycle.
 - Record a key or combo by pressing it.
 - Profiles per game: link a game's .exe and turn on auto-switch.
+- Sensitivity (DPI), polling rate, sleep timer and low power mode.
+- Lighting on mice that support it: off, static, breathing or rainbow, any color (picker with hex and RGB) and brightness.
+- More than one Razer mouse plugged in? Pick which one to set up from the header.
 - Lives in the system tray; can start with Windows.
+- Problems are written to `%APPDATA%\FreeRazer\error.log` (Settings > Open error log), and the window says when one happens.
 - Profiles are stored in `%APPDATA%\FreeRazer\profiles.json`. A `profiles.json` from an older version next to the app is copied there on first start (the old file is left as a backup).
 
 Works alongside Razer Synapse (tested with Synapse 4), for example if you keep Synapse for a Razer keyboard. Synapse leaves the mouse alone in the background, but opening the mouse in Synapse's window writes Synapse's own settings to it; FreeRazer notices within 30 seconds and puts yours back.
@@ -284,7 +288,7 @@ powershell -ExecutionPolicy Bypass -File build.ps1
 powershell -ExecutionPolicy Bypass -File release.ps1 -Notes "What changed"
 ```
 
-Installed copies check GitHub Releases at most once a day (or when you click Check for updates in Settings or the tray menu) and ask before updating; the pop-up never appears while a linked game is in focus. On Update now they download `FreeRazerSetup.exe`, check it against the published `.sha256`, and install it silently. While the repo is private, each PC needs a read-only token in Settings > Updates; remove it once the repo is public.
+Installed copies check GitHub Releases at most once a day (or when you click Check for updates in Settings or the tray menu) and ask before updating; the pop-up never appears while a linked game is in focus. On Update now they download `FreeRazerSetup.exe`, check it against the published `.sha256`, and install it silently.
 
 ## Adding a mouse
 
@@ -309,7 +313,7 @@ Mice without their own drawing get a generic one (`'drawing': 'generic'`).
 
 ## Protocol notes
 
-Captured from Razer's web configurator via WebHID on the owner's own mouse. Feature report 0, 90 bytes: byte 0 status (02 ok, 01 busy), byte 1 transaction ID, byte 5 data size, bytes 6-7 command class and ID, arguments from byte 8, byte 88 the XOR of bytes 2-87. Set a button: class 02 ID 0C, arguments `[profile 01, button, hypershift 00, action type, payload length, payload]`; read: ID 8C. Action types: 01 mouse button, 02 key `[modifiers, HID usage]` (Ctrl 01, Shift 02, Alt 04), 06 DPI. Polling rate: newer mice read with 00/C0 and set with 00/40 (125 to 8000 Hz); older ones such as the DeathAdder V2 Pro refuse 00/C0 and use 00/85 and 00/05 (125, 500, 1000 Hz). The app tries the newer command first.
+Captured from Razer's web configurator via WebHID on the owner's own mouse. Feature report 0, 90 bytes: byte 0 status (02 ok, 01 busy), byte 1 transaction ID, byte 5 data size, bytes 6-7 command class and ID, arguments from byte 8, byte 88 the XOR of bytes 2-87. Set a button: class 02 ID 0C, arguments `[profile 01, button, hypershift 00, action type, payload length, payload]`; read: ID 8C. Action types: 01 mouse button, 02 key `[modifiers, HID usage]` (Ctrl 01, Shift 02, Alt 04), 06 DPI. Polling rate: newer mice read with 00/C0 and set with 00/40 (125 to 8000 Hz); older ones such as the DeathAdder V2 Pro refuse 00/C0 and use 00/85 and 00/05 (125, 500, 1000 Hz). The app tries the newer command first. Lighting (OpenRazer's extended matrix, LED 04 = logo): set effect 0F/02 `[storage 01, LED, effect, ...]` with effect 00 off, 01 static `[.., 00, 00, 01, R, G, B]`, 02 breathing `[.., 01, 00, 01, R, G, B]`, 03 spectrum; brightness 0F/04 `[01, LED, 0-255]`; 0F/82 and 0F/84 read them back.
 
 ## Licence
 

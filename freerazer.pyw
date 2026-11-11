@@ -22,13 +22,24 @@ CFG = rs.profiles_path()
 LOG = os.path.join(os.path.dirname(CFG), 'error.log')  # the exe has no console, so problems are written here
 
 
-def log_error(where):
-    """Append the exception being handled to error.log, so a silent failure can still be found."""
+LOG_MAX = 512_000  # bytes; past this the oldest half is dropped
+
+
+def log_error(where, exc=None):
+    """Append an exception (the one being handled, or exc=(type, value, traceback)) to error.log, with the
+    app version, so a silent failure can still be found. The log keeps only its newest ~256 KB."""
     import time
     import traceback
+    text = ''.join(traceback.format_exception(*exc)) if exc else traceback.format_exc()
     try:
+        if os.path.exists(LOG) and os.path.getsize(LOG) > LOG_MAX:
+            with open(LOG, 'rb') as f:
+                f.seek(-LOG_MAX // 2, os.SEEK_END)
+                tail = f.read()
+            with open(LOG, 'wb') as f:
+                f.write(b'(older entries removed)\n' + tail[tail.find(b'\n') + 1:])
         with open(LOG, 'a', encoding='utf-8') as f:
-            f.write(f'{time.strftime("%Y-%m-%d %H:%M:%S")} {where}\n{traceback.format_exc()}\n')
+            f.write(f'{time.strftime("%Y-%m-%d %H:%M:%S")} FreeRazer {APP_VERSION} {where}\n{text}\n')
     except OSError:
         pass
 BG, SIDE, PANEL, LINE, LEADER = '#1b1c1f', '#151619', '#26282d', '#7c818a', '#474b53'
@@ -84,26 +95,12 @@ SETUP_ASSET = 'FreeRazerSetup.exe'  # release asset, plus SETUP_ASSET + '.sha256
 NO_WINDOW = 0x08000000  # CREATE_NO_WINDOW: helper programs run without flashing a console
 
 
-TOKEN_FILE = os.path.join(os.path.dirname(CFG), 'update_token')  # only while the repo is private; never exported
-
-
-def read_token():
-    try:
-        with open(TOKEN_FILE, encoding='utf-8-sig') as f:
-            return f.read().strip()
-    except OSError:
-        return ''
-
-
-def _curl(*args, timeout=60, token=''):
-    """Windows' own curl does the HTTPS, so the exe doesn't have to bundle OpenSSL. The token goes in through
-    stdin (curl's -K -), not the command line, so other programs can't read it from the process list; curl
-    drops it on GitHub's redirect to its file storage."""
-    config = f'header = "Authorization: Bearer {token}"\n' if token else ''
-    r = subprocess.run(['curl.exe', '-fsSL', '--max-time', str(timeout), '-K', '-', *args], input=config.encode(),
-                       capture_output=True, creationflags=NO_WINDOW)
-    if r.returncode == 22 and not token:
-        raise OSError('no release found (a private repo needs a token in Settings > Updates)')
+def _curl(*args, timeout=60):
+    """Windows' own curl does the HTTPS, so the exe doesn't have to bundle OpenSSL."""
+    r = subprocess.run(['curl.exe', '-fsSL', '--max-time', str(timeout), *args], capture_output=True,
+                       creationflags=NO_WINDOW)
+    if r.returncode == 22:
+        raise OSError('no release found on GitHub')
     if r.returncode:
         raise OSError(f'could not reach GitHub (curl error {r.returncode})')
     return r.stdout
@@ -113,11 +110,11 @@ def version_tuple(v):
     return tuple(int(x) for x in re.findall(r'\d+', v)[:3])
 
 
-def latest_release(token=''):
-    """(tag, {asset name: (public download url, API url)}, release notes) of the newest published release."""
+def latest_release():
+    """(tag, {asset name: download url}, release notes) of the newest published release."""
     data = json.loads(_curl('-H', 'Accept: application/vnd.github+json',
-                            f'https://api.github.com/repos/{UPDATE_REPO}/releases/latest', timeout=20, token=token))
-    return (data.get('tag_name', ''), {a['name']: (a['browser_download_url'], a['url']) for a in data.get('assets', [])},
+                            f'https://api.github.com/repos/{UPDATE_REPO}/releases/latest', timeout=20))
+    return (data.get('tag_name', ''), {a['name']: a['browser_download_url'] for a in data.get('assets', [])},
             data.get('body') or '')
 
 
@@ -127,22 +124,18 @@ def file_sha256(path):
     return out[1].replace(' ', '').strip().lower() if len(out) > 1 else ''
 
 
-def download_update(assets, token=''):
+def download_update(assets):
     """Download the new installer and check it against the release's published SHA-256; returns its path.
-    Only this repo's own release links are accepted, so a tampered API answer can't point elsewhere.
-    With a token (private repo) the files come through the API asset links, the only ones a token opens."""
-    which, prefix = (1, f'https://api.github.com/repos/{UPDATE_REPO}/releases/assets/') if token else \
-                    (0, f'https://github.com/{UPDATE_REPO}/releases/download/')
-    exe, sums = assets.get(SETUP_ASSET), assets.get(SETUP_ASSET + '.sha256')
-    exe_url, sum_url = exe and exe[which], sums and sums[which]
+    Only this repo's own release links are accepted, so a tampered API answer can't point elsewhere."""
+    prefix = f'https://github.com/{UPDATE_REPO}/releases/download/'
+    exe_url, sum_url = assets.get(SETUP_ASSET), assets.get(SETUP_ASSET + '.sha256')
     if not (exe_url and sum_url and exe_url.startswith(prefix) and sum_url.startswith(prefix)):
         raise OSError('the release has no installer and checksum from this project')
     folder = os.path.join(os.environ.get('TEMP') or os.path.dirname(CFG), 'FreeRazerUpdate')
     os.makedirs(folder, exist_ok=True)
     path = os.path.join(folder, SETUP_ASSET)
-    raw = ('-H', 'Accept: application/octet-stream') if token else ()
-    _curl(*raw, '-o', path, exe_url, timeout=300, token=token)
-    expected = _curl(*raw, sum_url, timeout=30, token=token).decode('ascii', 'replace').split()[0].lower()
+    _curl('-o', path, exe_url, timeout=300)
+    expected = _curl(sum_url, timeout=30).decode('ascii', 'replace').split()[0].lower()
     if not re.fullmatch(r'[0-9a-f]{64}', expected) or file_sha256(path) != expected:
         os.remove(path)
         raise OSError('the download did not match its published checksum, so it was thrown away')
@@ -484,6 +477,12 @@ class App(tk.Tk):
             self.withdraw()
         self.after(500, self.poll_games)
         self._connected, self._q = None, queue.Queue()  # background results, picked up by poll_games
+        import threading
+
+        def thread_error(a):  # an unexpected error in background work: log it, say so in the window
+            log_error('error in background work', (a.exc_type, a.exc_value, a.exc_traceback))
+            self._q.put(self._problem)
+        threading.excepthook = thread_error
         self.after(300, self.refresh_device)
         self.after(60_000, self.check_updates)
         if '--updated' in sys.argv and self.tray:  # started by the installer after an automatic update
@@ -530,8 +529,12 @@ class App(tk.Tk):
             self.tray = None
             log_error('tray icon could not start')
 
-    def report_callback_exception(self, *_):
-        log_error('error in the window')  # Tk calls this for exceptions in clicks and timers
+    def report_callback_exception(self, *exc):
+        log_error('error in the window', exc)  # Tk calls this for exceptions in clicks and timers
+        self._problem()
+
+    def _problem(self):
+        self.set_status('Something went wrong. The details are in the error log (Settings > Open error log).')
 
     def _make_tray(self):
         import pystray
@@ -845,17 +848,6 @@ class App(tk.Tk):
         ttk.Button(row, text='Check for updates', command=lambda: self.check_updates(manual=True)).pack(side='left')
         self.update_lbl = ttk.Label(row, style='Muted.TLabel', text=f'Version {APP_VERSION}')
         self.update_lbl.pack(side='left', padx=(12, 0))
-        # only needed while the GitHub repo is private: a read-only token, kept on this PC
-        row = ttk.Frame(pg)
-        row.pack(anchor='w', pady=(8, 0))
-        ttk.Label(row, text='Private repo token', style='Muted.TLabel').pack(side='left')
-        self.token_var = tk.StringVar()
-        ttk.Entry(row, textvariable=self.token_var, show='•', width=36).pack(side='left', padx=(12, 8))
-        ttk.Button(row, text='Save', command=self.save_token).pack(side='left')
-        ttk.Button(row, text='Remove', style='Link.TButton', command=self.remove_token).pack(side='left', padx=(12, 0))
-        self.token_lbl = ttk.Label(row, style='Muted.TLabel')
-        self.token_lbl.pack(side='left', padx=(12, 0))
-        self.token_lbl.configure(text='Saved' if read_token() else 'Not set')
         ttk.Label(pg, text='About', style='H2.TLabel').pack(anchor='w', pady=(32, 4))
         self.about_lbl = ttk.Label(pg, style='Muted.TLabel')
         self.about_lbl.pack(anchor='w')
@@ -1681,6 +1673,16 @@ class App(tk.Tk):
             if key in keep and now is not None and now != keep[key]:
                 write(keep[key])
                 fixed.append(label)
+        light = info[5]
+        if light and 'light' in keep:
+            effect, rgb = keep['light'][0], tuple(keep['light'][1])
+            colored = effect in ('static', 'breathing')  # the other effects have no colour to compare
+            if light[0] != effect or (colored and light[1] != rgb):
+                self.mouse.set_lighting(effect, rgb)
+                fixed.append('lighting')
+        if light and 'bright' in keep and light[2] != keep['bright']:
+            self.mouse.set_brightness(keep['bright'])
+            fixed.append('brightness')
         return fixed
 
     def remember(self, key, value):
@@ -1800,6 +1802,7 @@ class App(tk.Tk):
         if (effect, rgb) == self._shown.get('light'):
             return
         self._shown['light'] = (effect, rgb)
+        self.remember('light', [effect, list(rgb)])
         self._send(lambda: self.mouse.set_lighting(effect, rgb), f'Lighting set to {LIGHT_NAMES[effect]}.')
 
     def show_color(self, rgb=None):
@@ -1944,6 +1947,7 @@ class App(tk.Tk):
         if not self.bright.on or v == self._shown.get('bright'):
             return
         self._shown['bright'] = v
+        self.remember('bright', v)
         self._send(lambda: self.mouse.set_brightness(v), f'Brightness set to {v}%.')
 
     def dpi_sliding(self, value):
@@ -1973,22 +1977,6 @@ class App(tk.Tk):
         threading.Thread(target=work, daemon=True).start()
 
     # ---------- updates (GitHub Releases) ----------
-    def save_token(self):
-        token = self.token_var.get().strip()
-        self.token_var.set('')  # never left on screen
-        if not re.fullmatch(r'(github_pat_|ghp_)[A-Za-z0-9_]{20,255}', token):
-            return self.set_status('That doesn\'t look like a GitHub token (they start with github_pat_).')
-        with open(TOKEN_FILE, 'w', encoding='ascii') as f:
-            f.write(token)
-        self.token_lbl.configure(text='Saved')
-        self.check_updates(manual=True)
-
-    def remove_token(self):
-        if os.path.exists(TOKEN_FILE):
-            os.remove(TOKEN_FILE)
-        self.token_lbl.configure(text='Not set')
-        self.set_status('Token removed.')
-
     def toggle_auto_update(self):
         self.cfg['auto_update'] = self.auto_update_var.get()
         self.write_cfg()
@@ -2005,7 +1993,7 @@ class App(tk.Tk):
 
         def work():
             try:
-                tag, assets, notes = latest_release(read_token())
+                tag, assets, notes = latest_release()
                 if version_tuple(tag) <= version_tuple(APP_VERSION):
                     return self._q.put(lambda: self._update_checked(f'Version {APP_VERSION} · up to date', manual,
                                                                     uptodate=True))
@@ -2059,7 +2047,7 @@ class App(tk.Tk):
 
         def work():
             try:
-                path = download_update(assets, read_token())
+                path = download_update(assets)
                 self._q.put(lambda: self._install_update(tag, path))
             except (OSError, ValueError, KeyError) as e:
                 msg = f'The update could not be downloaded: {e}'
@@ -2180,4 +2168,10 @@ if __name__ == '__main__':
         k32.SetEvent(SHOW_EVENT)
         sys.exit()
     ctypes.windll.shcore.SetProcessDpiAwareness(1)  # sharp text on scaled displays instead of blurry upscaling
-    App().mainloop()
+    try:
+        App().mainloop()
+    except Exception:  # the exe has no console: without this a crash would leave no trace at all
+        log_error('FreeRazer stopped')
+        ctypes.windll.user32.MessageBoxW(None, f'FreeRazer stopped because of an error. The details were saved to:\n'
+                                               f'{LOG}', 'FreeRazer', 0x10)
+        sys.exit(1)
