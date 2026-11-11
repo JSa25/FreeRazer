@@ -75,16 +75,18 @@ def check_db(db):
         raise ValueError('not a FreeRazer mouse database')
     out = {}
     is_int = lambda v, lo, hi: isinstance(v, int) and not isinstance(v, bool) and lo <= v <= hi
+    unique = lambda v, ok: isinstance(v, list) and all(ok(x) for x in v) and len(set(v)) == len(v)
     for e in db['mice']:
-        ok = (isinstance(e, dict) and is_int(e.get('pid'), 1, 0xFFFF) and isinstance(e.get('name'), str)
-              and 0 < len(e['name']) <= 80 and set(e) <= {'pid', 'name', 'dpi_max', 'dpi_read_store', 'poll',
+        ok = (isinstance(e, dict) and set(e) <= {'pid', 'name', 'dpi_max', 'dpi_read_store', 'poll',
               'poll_again_txn', 'leds', 'features', 'txn'}
-              and is_int(e.get('dpi_max', 100), 100, 100000) and e.get('dpi_read_store', 0) in (0, 1)
+              and is_int(e.get('pid'), 1, 0xFFFF) and e.get('pid') not in out
+              and isinstance(e.get('name'), str) and 0 < len(e['name']) <= 80
+              and is_int(e.get('dpi_max', 100), 100, 100000) and is_int(e.get('dpi_read_store', 0), 0, 1)
               and e.get('poll', 'classic') in ('classic', 'v2') and is_int(e.get('poll_again_txn', 0), 0, 255)
-              and isinstance(e.get('leds', []), list) and set(e.get('leds', [])) <= DB_LEDS
-              and isinstance(e.get('features', []), list) and set(e.get('features', [])) <= set(ALL_FEATURES)
-              and isinstance(e.get('txn', {}), dict) and set(e.get('txn', {})) <= DB_TXN_KEYS
-              and all(is_int(t, 0, 255) for t in e.get('txn', {}).values()))
+              and unique(e.get('leds', []), lambda x: is_int(x, 0, 255) and x in DB_LEDS)
+              and unique(e.get('features', []), lambda x: isinstance(x, str) and x in ALL_FEATURES)
+              and isinstance(e.get('txn', {}), dict)
+              and all(isinstance(k, str) and k in DB_TXN_KEYS and is_int(t, 0, 255) for k, t in e.get('txn', {}).items()))
         if not ok:
             raise ValueError(f'bad mouse database entry: {str(e)[:80]}')
         out[e['pid']] = e
@@ -114,7 +116,10 @@ def db_model(e):
 def unknown_model(pid, name=''):
     """A Razer mouse with no data: no features, only buttons confirmed on the mouse can change."""
     common = {b: v for b, v in DEVICES[0]['buttons'].items() if b in COMMON_BUTTONS}
-    return {'name': name or f'Razer mouse {pid:#06x}', 'pids': (pid,), 'txn': None, 'verified': False,
+    # named like db_model names it ('Razer Basilisk V3' -> 'Basilisk V3'), so what the app remembers per mouse
+    # name still applies after a database update adds this mouse
+    return {'name': (name or '').removeprefix('Razer ').strip() or f'Razer mouse {pid:#06x}', 'pids': (pid,),
+            'txn': None, 'verified': False,
             'drawing': 'generic', 'buttons': common, 'features': set()}
 
 
@@ -196,7 +201,9 @@ def pretty(action):
 
 
 def encode(action):
-    """action name -> (action type, payload bytes)"""
+    """action name -> (action type, payload bytes); ValueError for anything else (profiles can be imported)"""
+    if not isinstance(action, str):
+        raise ValueError(f'unknown action {action!r}')
     if action.startswith('mouse:') and action[6:] in MOUSE:
         return 0x01, [MOUSE[action[6:]]]
     if action == 'dpi:cycleup':
@@ -302,8 +309,9 @@ def resolve(default, own=None, model=DEVICES[0]):
             if b == 1:
                 raise ValueError('left click cannot be changed')
             if b in out:
-                out[b] = buttons[b][1] if action == 'default' else action
-                encode(out[b])
+                # written the way the mouse reads it back ('shift+ctrl+5' -> 'ctrl+shift+5'), so a profile
+                # compares equal to what is on the mouse
+                out[b] = buttons[b][1] if action == 'default' else decode(*encode(action))
     return out
 
 
@@ -318,6 +326,8 @@ def transact(dev, pkt, tries=25):
         for _ in range(20):
             time.sleep(0.02)
             r = bytes(dev.get_feature_report(0, 91))[1:]  # drop report ID
+            if len(r) < 90:
+                raise OSError(f'short answer from the mouse ({len(r)} bytes)')
             if r[0] != 0x01:  # 01 = busy, 02 = ok
                 break
         if r[6:8] == bytes(pkt[6:8]):  # the answer echoes our command class and id
@@ -328,6 +338,17 @@ def transact(dev, pkt, tries=25):
     if timed_out:
         return timed_out
     raise OSError('another program (Razer Synapse?) kept talking to the mouse; try again')
+
+
+def _locked(method):
+    """Run a Mouse method under its lock from start to finish. The app reads on a background thread while
+    changes go out from others; without this a reconnect between two steps (to another mouse, or with the
+    polling table reset) could pair one mouse's reading with another's write."""
+    def run(self, *args, **kw):
+        with self.lock:
+            return method(self, *args, **kw)
+    run.__doc__ = method.__doc__
+    return run
 
 
 class Mouse:
@@ -343,14 +364,20 @@ class Mouse:
         ids = editable(self.model)
         return set(ids) if self.model['verified'] else self.confirmed.get(self.model['name'], set()) & set(ids)
 
+    @_locked
     def confirm_buttons(self):
-        """Which common buttons read back as their factory action. A real button does; an ID that isn't one
-        answers with leftover memory, which won't spell out exactly this. A button already changed (by FreeRazer
-        or Synapse) won't match either, which is why the app remembers what was confirmed. Reads only."""
+        """(model name, buttons) for the mouse actually connected: the common buttons that read back as their
+        factory action. A real button does; an ID that isn't one answers with leftover memory, which won't spell
+        out exactly this. A button already changed (by FreeRazer or Synapse) won't match either, which is why
+        the app remembers what was confirmed. Reads only."""
         self.connect()
-        known = self.confirmed.get(self.model['name'], set())
-        return {b for b in editable(self.model) if b in COMMON_BUTTONS and b not in known
-                and self._try(lambda b=b: self.get_action(b)) == self.model['buttons'][b][1]} | known
+        model = self.model
+        known = self.confirmed.get(model['name'], set())
+        got = {b for b in editable(model) if b in COMMON_BUTTONS and b not in known
+               and self._try(lambda b=b: self.get_action(b)) == model['buttons'][b][1]} | known
+        if self.model is not model:  # reconnected to another mouse part way: nothing here can be trusted
+            raise OSError('the mouse changed while its buttons were being read')
+        return model['name'], got
 
     def _try(self, read):
         """A read, or None if the mouse refuses that command."""
@@ -414,21 +441,26 @@ class Mouse:
                     self.dev.close()
                 self.dev = None  # unplugged or asleep: the next call looks for the mouse again
                 raise
+        if r[0] in (0x01, 0x04):  # still busy, or no answer: asleep or out of range, not a refusal
+            raise OSError(f'the mouse did not answer (status {r[0]:#04x}); is it asleep?')
         if r[0] != 0x02:
             raise OSError(f'mouse rejected command, status {r[0]:#04x}')
         return r
 
+    @_locked
     def get_action(self, button):
         self.connect()
         r = self.call(read_packet(button, self.txn))
         return decode(r[11], r[13:13 + r[12]])
 
+    @_locked
     def set_action(self, button, action):
         self.connect()
         if button not in self.writable():
             raise ValueError(f'button {button} cannot be changed on {self.model["name"]}')
         self.call(set_packet(button, action, self.txn))
 
+    @_locked
     def write(self, binding):
         for b, action in binding.items():
             self.set_action(b, action)
@@ -439,14 +471,19 @@ class Mouse:
         self.connect()
         return self.call(packet(cls, cmd, list(args), self.txn, size=0x0A if self.model['verified'] else size))[8:24]
 
+    @_locked
     def battery(self):
         """(percent, charging), or None for a mouse without a battery. Read on the V4 Pro: 07/80 byte 1 is the
         level out of 255, 07/84 byte 1 is charging."""
+        self.connect()
         level = self._try(lambda: self.read(0x07, 0x80, size=0x02)[1])
         if level is None:
             return None
+        if 'cmd_txn' in self.model and '0784' not in self.model['cmd_txn']:
+            return round(level * 100 / 255), False  # OpenRazer never asks these mice whether they charge
         return round(level * 100 / 255), bool(self._try(lambda: self.read(0x07, 0x84, size=0x02)[1]))
 
+    @_locked
     def power(self):
         """(sleep after idle in minutes, low power mode below this battery %), or None if the mouse refuses."""
         a, b = self._try(lambda: self.read(0x07, 0x83, size=0x02)), self._try(lambda: self.read(0x07, 0x81, size=0x01))
@@ -454,6 +491,7 @@ class Mouse:
             return None
         return round((a[0] << 8 | a[1]) / 60), byte_to_percent(b[0])
 
+    @_locked
     def set_sleep(self, minutes):
         if not SLEEP_MIN[0] <= int(minutes) <= SLEEP_MIN[1]:
             raise ValueError(f'sleep time must be {SLEEP_MIN[0]} to {SLEEP_MIN[1]} minutes')
@@ -461,13 +499,18 @@ class Mouse:
         self.connect()
         self.call(packet(0x07, 0x03, [s >> 8, s & 0xFF], self.txn, size=0x02))
 
+    @_locked
     def set_low_power(self, percent):
         self.connect()
         lo, hi = low_power_range(self.model)
         if not lo <= int(percent) <= hi:
             raise ValueError(f'low power level must be {lo} to {hi}%')
-        self.call(packet(0x07, 0x01, [percent_to_byte(int(percent))], self.txn, size=0x01))
+        b = percent_to_byte(int(percent))
+        if 'low_power_max' not in self.model:
+            b = min(b, 0x3F)  # OpenRazer never sends more than 0x3F; 25% would be 0x40
+        self.call(packet(0x07, 0x01, [b], self.txn, size=0x01))
 
+    @_locked
     def dpi(self):
         """Current (x, y) DPI, or None if refused. Read on the V4 Pro: 04/85 with storage 01 answers 01, x hi/lo,
         y hi/lo; OpenRazer reads most mice with storage 00 (the mouse database says which)."""
@@ -475,12 +518,14 @@ class Mouse:
         a = self._try(lambda: self.read(0x04, 0x85, [self.model.get('dpi_read_store', 1)], size=0x07))
         return None if a is None else (a[1] << 8 | a[2], a[3] << 8 | a[4])
 
+    @_locked
     def dpi_stages(self):
         """(active stage number from 1, [(x, y), ...]). 04/86 answers storage, active, count, then 7 bytes per
         stage: stage number, x hi/lo, y hi/lo, 2 reserved (read on the V4 Pro with five stages set by Synapse)."""
         self.connect()
         return parse_stages(self.call(packet(0x04, 0x86, [0x01], self.txn, size=0x26))[8:8 + 0x26])
 
+    @_locked
     def polling(self):
         """Polling rate in Hz, or None for a code we haven't seen or a mouse that refuses. A change shows up
         ~0.3 s after it is set. Newer mice answer 00/C0 (the V4 Pro rejects 00/85); older ones reject 00/C0 and
@@ -504,20 +549,23 @@ class Mouse:
         """The rates this mouse can be set to (the newer set until the first polling read)."""
         return sorted((self.poll_table or POLL_HZ).values())
 
+    @_locked
     def set_polling(self, hz):
         self.connect()
         if self.poll_table is None:
             self.polling()
-        code = {v: k for k, v in (self.poll_table or {}).items()}.get(hz)
+        table = self.poll_table  # one table for both the code and the command, even if a reconnect resets it
+        code = {v: k for k, v in (table or {}).items()}.get(hz)
         if code is None:
             raise ValueError(f'{hz} Hz is not one of {self.polling_rates()}')
-        if self.poll_table is POLL_HZ:
+        if table is POLL_HZ:
             self.call(packet(0x00, 0x40, [self.model.get('poll_args', 1), code], self.txn, size=0x02))
             if 'poll_again_txn' in self.model:  # OpenRazer sends these mice the set a second time, with 01
                 self.call(packet(0x00, 0x40, [0x01, code], self.txn, size=0x02), txn=self.model['poll_again_txn'])
         else:
             self.call(packet(0x00, 0x05, [code], self.txn, size=0x01))
 
+    @_locked
     def set_dpi(self, dpi):
         """One DPI for both axes. With one stage this is what web Synapse sends; with several (the DPI button
         cycles through them) only the active stage changes and the others stay as they are. A mouse without
@@ -535,10 +583,21 @@ class Mouse:
         stages[active - 1] = (d, d)
         self.call(stages_packet(active, stages, self.txn))
 
+    @_locked
+    def set_stages(self, active, stages):
+        """Write a whole DPI stage table [(x, y), ...] (1 to 5 stages), keeping stage `active` (from 1) picked."""
+        self.connect()
+        lo, hi = dpi_range(self.model)
+        if not 1 <= len(stages) <= 5 or not all(lo <= v <= hi for s in stages for v in s):
+            raise ValueError(f'DPI stages must be 1 to 5 values from {lo} to {hi}')
+        self.call(stages_packet(min(max(int(active), 1), len(stages)), [tuple(map(int, s)) for s in stages], self.txn))
+
+    @_locked
     def lighting(self):
         """(effect name, (r, g, b), brightness %) of the model's first LED, or None if it has none we know.
         0F/82 answers storage, led, effect, 2 effect bytes, colour count, r, g, b. That read isn't in OpenRazer
-        (it worked on the DeathAdder V2 Pro); a mouse that refuses it shows no effect picked."""
+        (it worked on the DeathAdder V2 Pro); for a mouse that refuses it the effect is None (unknown), which is
+        not the same as 'other' (an effect FreeRazer doesn't offer, such as Synapse's custom frames)."""
         self.connect()
         leds = self.model.get('leds')
         if not leds:
@@ -549,10 +608,11 @@ class Mouse:
         a = self._try(lambda: self.call(packet(0x0F, 0x82, [0x01, leds[0]], self.txn, size=0x0C),
                                         txn=self.model.get('cmd_txn', {}).get('0f02'))[8:])
         if a is None:
-            return 'other', (0, 0, 0), byte_to_percent(b[2])
+            return None, (0, 0, 0), byte_to_percent(b[2])
         effect = {v: k for k, v in LIGHT_EFFECTS.items()}.get(a[2], 'other')  # e.g. Synapse's own custom frames
         return effect, tuple(a[6:9]), byte_to_percent(b[2])
 
+    @_locked
     def set_lighting(self, effect, rgb=(0, 255, 0)):
         """The same effect on every LED the model has."""
         self.connect()
@@ -564,6 +624,7 @@ class Mouse:
                 args += [0, 0, 1, *rgb] if effect == 'static' else [1, 0, 1, *rgb]
             self.call(packet(0x0F, 0x02, args, self.txn, size=max(len(args), 6)))  # OpenRazer's sizes: 6 or 9
 
+    @_locked
     def set_brightness(self, percent):
         self.connect()
         if not self.model.get('leds') or not 0 <= int(percent) <= 100:
@@ -740,8 +801,9 @@ def probe(ids=range(1, 0x80)):
 
 class _FakeDev:
     """Stands in for the mouse in test(): records what was sent, answers 'ok'."""
-    def __init__(self, refuse=()):
+    def __init__(self, refuse=(), timeout=()):
         self.sent, self.refuse = [], set(refuse)  # refuse: (class, command) pairs answered with status 05
+        self.timeout = set(timeout)  # (class, command) pairs answered with 04, as a sleeping mouse does
         self.stray = 0  # how many of the next answers belong to another program's command
         self.actions = {}  # button: (action type, payload) for button reads to answer with
 
@@ -757,9 +819,9 @@ class _FakeDev:
             kind, payload = self.actions[last[9]]
             args = bytes([last[8], last[9], 0, kind, len(payload), *payload])
             return b'\x00\x02' + last[1:8] + args + bytes(82 - len(args))
-        refused = (last[6], last[7]) in self.refuse
+        status = b'\x04' if (last[6], last[7]) in self.timeout else b'\x05' if (last[6], last[7]) in self.refuse else b'\x02'
         # status, then the command header echoed back (as the mouse does), arguments zero
-        return b'\x00' + (b'\x05' if refused else b'\x02') + last[1:8] + bytes(82)
+        return b'\x00' + status + last[1:8] + bytes(82)
 
     def close(self):
         pass
@@ -928,15 +990,37 @@ def test():
     # buttons unlock when they read back as their factory action; a changed or odd answer doesn't
     m.dev = _FakeDev()
     m.dev.actions = {2: encode('mouse:right'), 4: encode('mouse:back'), 5: encode('f5'), 9: (0x09, [1])}
-    assert m.confirm_buttons() == {2, 4}
+    assert m.confirm_buttons() == ('Test Mouse', {2, 4})
     m.confirmed = {'Test Mouse': {2, 4}, 'Other Mouse': {5}}  # another model's confirmations don't count here
     m.set_action(4, 'f5')
     refused(lambda: m.set_action(5, 'f5'), lambda: m.set_action(9, 'f5'))
     for bad in ({**entry, 'txn': {'020c': 1}}, {**entry, 'leds': [0x20]}, {**entry, 'extra': 1}, {**entry, 'pid': -1},
-                {**entry, 'features': ['firmware']}):
+                {**entry, 'features': ['firmware']}, {**entry, 'leds': [[1]]}, {**entry, 'features': [['dpi']]},
+                {**entry, 'leds': [1.0]}, {**entry, 'dpi_read_store': 1.0}, {**entry, 'leds': [1] * 1000},
+                {**entry, 'pid': True}, {**entry, 'txn': {'0405': 3.0}}, {**entry, 'name': 7}, 'not a dict'):
         try:
             check_db({'version': 1, 'mice': [bad]})
             raise AssertionError(f'bad database entry accepted: {bad}')
+        except ValueError:
+            pass
+    try:
+        check_db({'version': 1, 'mice': [entry, entry]})
+        raise AssertionError('a mouse listed twice was accepted')
+    except ValueError:
+        pass
+    # no answer (asleep) is not a refusal: it must not look like "this mouse has no battery"
+    m.dev = _FakeDev(timeout={(0x07, 0x80)})
+    try:
+        m.battery()
+        raise AssertionError('a timed-out read was taken as "not supported"')
+    except OSError as e:
+        assert 'did not answer' in str(e)
+    # profiles are written the way the mouse reads them back, and odd actions are refused cleanly
+    assert resolve({}, {'5': 'shift+ctrl+5'})[5] == 'ctrl+shift+5'
+    for bad in ({'5': 5}, {'5': None}, {'5': 'ctrl+'}):
+        try:
+            resolve({}, bad)
+            raise AssertionError(f'bad action accepted: {bad}')
         except ValueError:
             pass
     shipped = db_paths()[0]

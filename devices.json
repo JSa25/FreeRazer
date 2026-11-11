@@ -1,5 +1,5 @@
 {
- "version": 20261110,
+ "version": 20261111,
  "source": "openrazer",
  "credit": "Device facts from OpenRazer (https://github.com/openrazer/openrazer, GPL-2.0); no OpenRazer code is included. Thank you to the OpenRazer contributors.",
  "mice": [
@@ -1391,7 +1391,7 @@
   },
   {
    "pid": 136,
-   "name": "RazerBasiliskUltimateReceiver",
+   "name": "Razer Basilisk Ultimate Receiver",
    "dpi_max": 20000,
    "dpi_read_store": 0,
    "poll": "classic",

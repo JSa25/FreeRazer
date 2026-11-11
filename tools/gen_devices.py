@@ -140,10 +140,16 @@ if __name__ == '__main__':
     if old and {k: v for k, v in old.items() if k != 'version'} == {k: v for k, v in db.items() if k != 'version'}:
         print(f'no change: {len(db["mice"])} mice, same as {out}')
         sys.exit(0)
-    # OpenRazer reorganising its source could make the parse find far fewer mice; never publish that
+    # OpenRazer reorganising its source could make the parse find far fewer mice, or far fewer settings for
+    # them (a renamed variable is enough); never publish that: every installed copy would lose them
+    feats = lambda d: sum(len(m.get('features', [])) for m in d['mice'])
     if old and len(db['mice']) < 0.9 * len(old['mice']):
         sys.exit(f'refusing: {len(db["mice"])} mice found, {out} has {len(old["mice"])} (did the source format change?)')
-    with open(out, 'w', encoding='utf-8') as f:
+    if old and feats(db) < 0.9 * feats(old):
+        sys.exit(f'refusing: {feats(db)} settings found, {out} has {feats(old)} (did the source format change?)')
+    # installed copies only take a higher version: a second build on the same day must still count as newer
+    db['version'] = max(db['version'], (old or {}).get('version', 0) + 1)
+    with open(out, 'w', encoding='utf-8', newline='\n') as f:  # same line endings on every OS (no git noise)
         json.dump(db, f, indent=1)
     n = len(db['mice'])
     print(f'{n} mice, {sum("features" in m for m in db["mice"])} with features -> {out}')

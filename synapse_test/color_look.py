@@ -11,7 +11,7 @@ fr.App.refresh_device = lambda self, repeat=True: None
 ctypes.windll.shcore.SetProcessDpiAwareness(1)
 app = fr.App()
 app.write_cfg = lambda: None
-app._send = lambda write, done: print('would send:', done, app._rgb, flush=True)
+app._send = lambda write, done, keep=None: print('would send:', done, app._rgb, flush=True)
 app.deiconify()
 app.attributes('-topmost', True)
 

@@ -25,6 +25,23 @@ LOG = os.path.join(os.path.dirname(CFG), 'error.log')  # the exe has no console,
 LOG_MAX = 512_000  # bytes; past this the oldest half is dropped
 
 
+def check_cfg(cfg):
+    """ValueError unless the settings file has the shape the app relies on (it can be edited by hand). Bad data
+    is reported, never silently dropped: the next save would lose it for good."""
+    def need(ok, what):
+        if not ok:
+            raise ValueError(f'{what} in the settings file is not valid')
+    str_dict = lambda d, vals: isinstance(d, dict) and all(isinstance(k, str) and vals(v) for k, v in d.items())
+    need(isinstance(cfg, dict), 'the file')
+    need(str_dict(cfg.get('profiles', {}), lambda p: str_dict(p, lambda a: isinstance(a, str))), '"profiles"')
+    need(str_dict(cfg.get('links', {}), lambda p: isinstance(p, str)), '"links"')
+    need(str_dict(cfg.get('confirmed', {}), lambda ids: isinstance(ids, list) and all(
+        isinstance(b, int) and not isinstance(b, bool) for b in ids)), '"confirmed"')
+    need(str_dict(cfg.get('keep', {}), lambda d: isinstance(d, dict)), '"keep"')
+    need(isinstance(cfg.get('active', 'default'), str), '"active"')
+    need(cfg.get('mouse') is None or isinstance(cfg['mouse'], int), '"mouse"')
+
+
 def log_error(where, exc=None):
     """Append an exception (the one being handled, or exc=(type, value, traceback)) to error.log, with the
     app version, so a silent failure can still be found. The log keeps only its newest ~256 KB."""
@@ -116,8 +133,10 @@ def latest_release():
     """(tag, {asset name: download url}, release notes) of the newest published release."""
     data = json.loads(_curl('-H', 'Accept: application/vnd.github+json',
                             f'https://api.github.com/repos/{UPDATE_REPO}/releases/latest', timeout=20))
-    return (data.get('tag_name', ''), {a['name']: a['browser_download_url'] for a in data.get('assets', [])},
-            data.get('body') or '')
+    if not isinstance(data, dict) or not isinstance(data.get('tag_name'), str) or not isinstance(data.get('assets', []), list):
+        raise ValueError('GitHub answered with something that is not a release')
+    assets = {a.get('name'): a.get('browser_download_url') for a in data.get('assets', []) if isinstance(a, dict)}
+    return data['tag_name'], assets, data.get('body') if isinstance(data.get('body'), str) else ''
 
 
 def file_sha256(path):
@@ -126,22 +145,43 @@ def file_sha256(path):
     return out[1].replace(' ', '').strip().lower() if len(out) > 1 else ''
 
 
-def download_update(assets):
+def download_update(tag, assets):
     """Download the new installer and check it against the release's published SHA-256; returns its path.
-    Only this repo's own release links are accepted, so a tampered API answer can't point elsewhere."""
-    prefix = f'https://github.com/{UPDATE_REPO}/releases/download/'
-    exe_url, sum_url = assets.get(SETUP_ASSET), assets.get(SETUP_ASSET + '.sha256')
-    if not (exe_url and sum_url and exe_url.startswith(prefix) and sum_url.startswith(prefix)):
+    The links are built here from the release tag, never taken from the API answer, so a tampered answer
+    can't point the download (and its checksum) somewhere else."""
+    if not re.fullmatch(r'v\d+(\.\d+){1,3}', tag) or SETUP_ASSET not in assets or SETUP_ASSET + '.sha256' not in assets:
         raise OSError('the release has no installer and checksum from this project')
+    base = f'https://github.com/{UPDATE_REPO}/releases/download/{tag}/'
     folder = os.path.join(os.environ.get('TEMP') or os.path.dirname(CFG), 'FreeRazerUpdate')
     os.makedirs(folder, exist_ok=True)
     path = os.path.join(folder, SETUP_ASSET)
-    _curl('-o', path, exe_url, timeout=300)
-    expected = _curl(sum_url, timeout=30).decode('ascii', 'replace').split()[0].lower()
+    _curl('-o', path, base + SETUP_ASSET, timeout=300)
+    expected = (_curl(base + SETUP_ASSET + '.sha256', timeout=30).decode('ascii', 'replace').split() or [''])[0].lower()
     if not re.fullmatch(r'[0-9a-f]{64}', expected) or file_sha256(path) != expected:
         os.remove(path)
         raise OSError('the download did not match its published checksum, so it was thrown away')
     return path
+
+
+def fullscreen_foreground():
+    """True while the window in front covers its whole screen (a game, a video), so automatic pop-ups wait."""
+    u32 = ctypes.windll.user32
+    from ctypes import wintypes as w
+    hwnd = u32.GetForegroundWindow()
+    cls = ctypes.create_unicode_buffer(64)
+    u32.GetClassNameW(hwnd, cls, 64)
+    if not hwnd or cls.value in ('Progman', 'WorkerW', 'Shell_TrayWnd'):  # the desktop and taskbar don't count
+        return False
+
+    class MonitorInfo(ctypes.Structure):
+        _fields_ = [('cbSize', w.DWORD), ('rcMonitor', w.RECT), ('rcWork', w.RECT), ('dwFlags', w.DWORD)]
+    win, mi = w.RECT(), MonitorInfo()
+    mi.cbSize = ctypes.sizeof(MonitorInfo)
+    if not u32.GetWindowRect(hwnd, ctypes.byref(win)) or \
+            not u32.GetMonitorInfoW(u32.MonitorFromWindow(hwnd, 2), ctypes.byref(mi)):  # 2: nearest monitor
+        return False
+    m = mi.rcMonitor
+    return win.left <= m.left and win.top <= m.top and win.right >= m.right and win.bottom >= m.bottom
 
 
 # shortcut: matched by name only (Synapse 2/3/4 run processes with these in their names); not tested against
@@ -438,8 +478,7 @@ class App(tk.Tk):
         try:
             with open(CFG, encoding='utf-8-sig') as f:  # -sig: also reads files an editor saved with a BOM
                 self.cfg = json.load(f)
-            if not isinstance(self.cfg, dict):
-                raise ValueError('not a settings file')
+            check_cfg(self.cfg)
         except (OSError, ValueError) as e:
             # never start with blank settings: the next save would overwrite the user's profiles
             log_error('settings file could not be read')
@@ -464,7 +503,7 @@ class App(tk.Tk):
         self.buttons, self.editable = self.model['buttons'], self.editable_for(self.model)
         migrate_startup()
         self.current, self.sel, self.edit, self.recording = 'default', 5, {}, False
-        if self.sel not in self.buttons or self.sel == 1:
+        if self.sel not in self.buttons or self.sel == 1 or (self.editable and self.sel not in self.editable):
             self.sel = (self.editable or [b for b in self.buttons if b != 1])[0]
         self._set_icon()
         self.tray, self._told_tray = None, False
@@ -486,6 +525,7 @@ class App(tk.Tk):
             self.withdraw()
         self.after(500, self.poll_games)
         self._connected, self._q = None, queue.Queue()  # background results, picked up by poll_games
+        self._gen = 0  # bumped when another mouse is picked; results read before that are dropped
         import threading
 
         def thread_error(a):  # an unexpected error in background work: log it, say so in the window
@@ -515,7 +555,10 @@ class App(tk.Tk):
         return ids if model['verified'] else [b for b in ids if b in self.mouse.confirmed.get(model['name'], ())]
 
     def resolved(self, name):
-        full = rs.resolve({}, None if name == 'default' else self.cfg["profiles"][name], self.model)
+        """{button: action} a profile puts on the mouse; ValueError for a missing profile or a bad action."""
+        if name != 'default' and name not in self.cfg['profiles']:
+            raise ValueError(f'there is no profile called "{name}"')
+        full = rs.resolve({}, None if name == 'default' else self.cfg['profiles'][name], self.model)
         return {b: a for b, a in full.items() if b in self.editable}
 
     def effective(self, b):
@@ -623,12 +666,22 @@ class App(tk.Tk):
         self.destroy()
 
     def write_cfg(self):
+        """Save the settings; False (and a message) if the file can't be written, e.g. held by another program.
+        Nothing in memory is lost then, and the next save tries again."""
         tmp = CFG + '.tmp'  # write then swap, so a crash can't leave a half-written file
-        with open(tmp, 'w', encoding='utf-8') as f:
-            json.dump(self.cfg, f, indent=2)
-        os.replace(tmp, CFG)
+        try:
+            with open(tmp, 'w', encoding='utf-8') as f:
+                json.dump(self.cfg, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())  # on disk before the swap, so a power cut can't leave an empty file
+            os.replace(tmp, CFG)
+        except OSError as e:
+            log_error('settings could not be saved')
+            self.set_status(f'Could not save your settings ({e.strerror or e}). They are kept until the next save.')
+            return False
         if getattr(self, 'tray', None):
             self.tray.update_menu()  # profile names, active profile or auto-switch may have changed
+        return True
 
     # ---------- layout ----------
     # Follows Microsoft's Windows app guidance: top navigation for 5 or fewer equal sections, a 52 px header,
@@ -749,7 +802,7 @@ class App(tk.Tk):
         self.bind('<Escape>', lambda e: self.on_key(e) if self.recording else self.close_popover())
         self.canvas.bind('<Return>', lambda e: self.select(self.sel))
         for key, step in (('<Up>', -1), ('<Left>', -1), ('<Down>', 1), ('<Right>', 1)):
-            self.canvas.bind(key, lambda e, s=step: self.select(self.editable[(self.editable.index(self.sel) + s) % len(self.editable)]))
+            self.canvas.bind(key, lambda e, s=step: self.step_sel(s))
         self._draw_mouse()
         self._build_popover(pg)
 
@@ -936,7 +989,9 @@ class App(tk.Tk):
         self.saved_lbl.pack(side='right')
         self.pop_open = False
         # the picture is centred, so it moves when the window is resized; move the editor with it
-        parent.bind('<Configure>', lambda e: self.pop_open and self.after_idle(self.open_popover))
+        # checked again when it runs: the editor may have been closed in the meantime
+        parent.bind('<Configure>', lambda e: self.pop_open and self.after_idle(
+            lambda: self.pop_open and self.open_popover()))
 
     def open_popover(self):
         """Place the editor under the selected button's label, or above it when there's no room below."""
@@ -1208,7 +1263,7 @@ class App(tk.Tk):
             if b in self.editable:
                 c.tag_bind(f'b{b}', '<Button-1>', lambda e, b=b: self.select(b))
             else:
-                c.tag_bind(f'b{b}', '<Button-1>', lambda e: self.set_status('Left click is locked so you can always click.'))
+                c.tag_bind(f'b{b}', '<Button-1>', lambda e, b=b: self.locked(b))
 
     def extra_height(self):
         """Canvas height: the picture, plus the More buttons rows when this mouse has buttons beyond it."""
@@ -1218,10 +1273,8 @@ class App(tk.Tk):
     def on_canvas_click(self, e):
         self.canvas.focus_set()
         b = self.hit_test(e.x / self.k, e.y / self.k)
-        if b in self.editable:
-            self.select(b)
-        elif b is not None:
-            self.set_status('Left click is locked so you can always click.')
+        if b is not None:
+            self.select(b)  # says why when it can't be changed
         elif not self.canvas.find_withtag('current'):  # empty space closes the editor
             self.close_popover()
 
@@ -1306,10 +1359,23 @@ class App(tk.Tk):
         self.pick_box.pack(fill='x', pady=(8, 0))
 
     def select(self, b):
+        if b not in self.editable:  # the editor only opens for a button that can be changed
+            return self.locked(b)
         self.stop_record()
         self.sel = b
         self.redraw()
         self.open_popover()
+
+    def step_sel(self, step):
+        """Arrow keys on the picture: the next changeable button."""
+        ids = self.editable
+        if ids:
+            self.select(ids[((ids.index(self.sel) if self.sel in ids else -1) + step) % len(ids)])
+
+    def locked(self, b):
+        self.set_status('Left click is locked so you can always click.' if b == 1 else
+                        f'{self.buttons[b][0]} can\'t be changed on this mouse: it didn\'t answer with its factory '
+                        'setting. Reset the mouse to factory settings in Razer Synapse to unlock it.')
 
     # ---------- editing (every change saves straight away) ----------
     def set_action(self, b, action):
@@ -1443,8 +1509,11 @@ class App(tk.Tk):
             if on_close:
                 on_close()
 
+        # inside = the pop-up itself or one of its widgets ('.!toplevel2' is NOT inside '.!toplevel')
+        inside = lambda w: str(w) == str(top) or str(w).startswith(str(top) + '.')
+
         def click(e):
-            if not str(e.widget).startswith(str(top)):
+            if not inside(e.widget):
                 close()
 
         def gone():
@@ -1452,7 +1521,7 @@ class App(tk.Tk):
                 f = self.focus_get()
             except KeyError:  # focus in a widget Tk doesn't wrap, such as a combobox list
                 f = None
-            if not (f and str(f).startswith(str(top))):
+            if not (f and inside(f)):
                 close()
         top.close = close
         top.bind('<Escape>', close)
@@ -1542,13 +1611,16 @@ class App(tk.Tk):
             self.base = self.current  # what auto-switch returns to after a game
 
     def put_on_mouse(self, name, why=''):
-        binding = self.resolved(name)
-        try:
-            self.mouse.write(binding)
-        except OSError as e:
-            self.set_status(f'Could not write to the mouse: {e}')
-            return False
-        self.cfg['active'] = name
+        # under the mouse's lock, so the Synapse put-back (background thread) can't write the old profile
+        # back between this write and 'active' changing
+        with self.mouse.lock:
+            try:
+                binding = self.resolved(name)
+                self.mouse.write(binding)
+            except (OSError, ValueError) as e:
+                self.set_status(f'Could not put "{self.shown(name)}" on the mouse: {e}')
+                return False
+            self.cfg['active'] = name
         self.write_cfg()
         self.refresh_list()
         self.set_status(f'Mouse is on "{self.shown(name)}"{why}: {rs.describe(binding, self.model)}')
@@ -1587,6 +1659,9 @@ class App(tk.Tk):
                         if self.cfg['auto'] else 'Auto-switch is off.')
 
     def poll_games(self):
+        # scheduled first: a callback below can open a dialog that waits for an answer, and auto-switch must
+        # keep running meanwhile
+        self.after(500, self.poll_games)
         try:
             while True:  # results from background reads and DPI/polling writes (Tk must only be touched here)
                 try:
@@ -1605,8 +1680,8 @@ class App(tk.Tk):
                 if want != self.cfg.get('active') and want != getattr(self, '_failed', None):
                     why = f' for {exe}' if exe in self.cfg['links'] else ''
                     self._failed = None if self.put_on_mouse(want, why) else want
-        finally:
-            self.after(500, self.poll_games)
+        except Exception:  # never let one bad turn stop auto-switch for good
+            log_error('auto-switch')
 
     def read_mouse(self):
         try:
@@ -1619,7 +1694,12 @@ class App(tk.Tk):
         if not self.editable:
             return self.set_status(f'No button on {self.model["name"]} answered with its factory setting, so buttons '
                                    'stay as they are. Reset the mouse to factory settings in Razer Synapse to unlock them.')
-        matches = [n for n in self.names() if self.resolved(n) == on_mouse]
+        def same(name):
+            try:
+                return self.resolved(name) == on_mouse
+            except ValueError:  # a profile with an action the app can't use: it can't be what's on the mouse
+                return False
+        matches = [n for n in self.names() if same(n)]
         if not matches:
             self.set_status(f'The mouse has bindings that are not in any profile: {rs.describe(on_mouse, self.model)}')
             return
@@ -1635,6 +1715,7 @@ class App(tk.Tk):
         """Every 30 s, read battery and DPI off the main thread (the reads take ~0.5 s).
         A failed read means the mouse was unplugged, switched off or asleep; the next one reconnects."""
         import threading
+        gen = self._gen
 
         def work():
             try:
@@ -1649,15 +1730,26 @@ class App(tk.Tk):
             self._q.put(lambda: self._mice_done(found))
             try:
                 info = self.read_info()
-                fixed = self.keep_settings(info) if synapse else []
+            except OSError:  # unplugged, switched off or asleep
+                info = None
+            if info and synapse:
+                try:
+                    fixed = self.keep_settings(info)
+                except OSError:
+                    fixed = []
+                except Exception:  # a bug here must not make the mouse look disconnected
+                    log_error('putting settings back after Synapse')
+                    fixed = []
+                    self._q.put(self._problem)
                 if fixed:  # Synapse's window pushes its own profile when it shows a mouse
                     time.sleep(0.4)
-                    info = self.read_info()
+                    try:
+                        info = self.read_info()
+                    except OSError:
+                        info = None
                     msg = f'Razer Synapse changed the {", ".join(fixed)}. FreeRazer put your settings back.'
                     self._q.put(lambda: self.set_status(msg))
-            except (OSError, ValueError):
-                info = None
-            self._q.put(lambda: self._device_done(info))
+            self._q.put(lambda: self._device_done(info) if gen == self._gen else None)
         threading.Thread(target=work, daemon=True).start()
         if repeat:
             self.after(30000, self.refresh_device)
@@ -1675,16 +1767,21 @@ class App(tk.Tk):
     def confirm_buttons(self):
         """For a mouse not tested here: unlock the buttons that read back as their factory action, and remember
         them (a button changed later won't read back as factory again)."""
-        name = self.mouse.model['name'] if self.mouse.model else self.model['name']
-        got = self.mouse.confirm_buttons()
+        name, got = self.mouse.confirm_buttons()  # the name of the mouse actually read, not the one shown
         if got != self.mouse.confirmed.get(name, set()):
             self.mouse.confirmed[name] = got
             self.cfg.setdefault('confirmed', {})[name] = sorted(got)
             self.write_cfg()
         if name == self.model['name'] and self.editable != self.editable_for(self.model):
-            self.editable = self.editable_for(self.model)
-            self._draw_mouse()  # clickable labels follow what can be changed
-            self.load_profile(self.current)
+            self.set_editable(self.editable_for(self.model))
+
+    def set_editable(self, ids):
+        """New set of changeable buttons: the picked button moves to one of them, the picture follows."""
+        self.editable = ids
+        if self.sel not in self.buttons or self.sel == 1 or (ids and self.sel not in ids):
+            self.sel = (ids or [b for b in self.buttons if b != 1])[0]
+        self._draw_mouse()  # clickable labels follow what can be changed
+        self.load_profile(self.current)
 
     def _use_model(self, model):
         """A different mouse: rebuild the picture and button list for it."""
@@ -1692,11 +1789,8 @@ class App(tk.Tk):
             return
         self.close_popover()
         self.model = model
-        self.buttons, self.editable = model['buttons'], self.editable_for(model)
-        if self.sel not in self.buttons or self.sel == 1:
-            self.sel = (self.editable or [b for b in self.buttons if b != 1])[0]
-        self._draw_mouse()
-        self.load_profile(self.current)
+        self.buttons = model['buttons']
+        self.set_editable(self.editable_for(model))
         w, h = self._min_size  # a mouse with More buttons needs a taller window
         h += round((self.extra_height() - H) * self.k)
         self.minsize(w, h)
@@ -1708,6 +1802,7 @@ class App(tk.Tk):
             return
         self.cfg['mouse'] = pid
         self.write_cfg()
+        self._gen += 1  # a refresh still running for the previous mouse is ignored when it lands
         self.mouse.choose(pid)
         self._use_model(rs.model_for(pid, dict(self._mice).get(pid, '')))  # even before it answers (it may be asleep)
         self._connected = False  # _device_done then redraws the buttons for the newly picked model
@@ -1723,6 +1818,10 @@ class App(tk.Tk):
         """Runs on the background thread while Synapse is open. Tested with Synapse 4: it leaves the mouse alone
         in the background, but showing a mouse in its window writes Synapse's profile onto it. Whatever differs
         from the profile and settings chosen here is written back. Returns what was put back."""
+        with self.mouse.lock:  # nothing else writes to the mouse until this compare-and-write is done
+            return self._keep_settings(info)
+
+    def _keep_settings(self, info):
         model = self.mouse.model
         if model['name'] != self.model['name']:  # the window shows another mouse; nothing here to compare with
             return []
@@ -1734,7 +1833,15 @@ class App(tk.Tk):
             fixed.append('buttons')
         _, dpi, hz, _, power, light = info
         keep = self.cfg.get('keep', {}).get(model['name'], {})
-        for key, now, label, write in (('dpi', has('dpi') and dpi and dpi[0], 'DPI', self.mouse.set_dpi),
+        if has('stages') and 'stages' in keep:
+            # the whole stage table, not the current DPI: the DPI button changes which stage is in use, and that
+            # is the user's choice, not Synapse's
+            active, stages = self.mouse.dpi_stages()
+            if [list(s) for s in stages] != keep['stages']:
+                self.mouse.set_stages(active, keep['stages'])
+                fixed.append('DPI')
+        for key, now, label, write in (('dpi', not has('stages') and has('dpi') and dpi and dpi[0], 'DPI',
+                                        self.mouse.set_dpi),
                                        ('hz', has('poll') and hz, 'polling rate', self.mouse.set_polling),
                                        ('sleep', has('sleep') and power and power[0], 'sleep time', self.mouse.set_sleep),
                                        ('low', has('low_power') and power and power[1], 'low power level',
@@ -1743,7 +1850,7 @@ class App(tk.Tk):
                 write(keep[key])
                 fixed.append(label)
         light = light if has('light') else None
-        if light and 'light' in keep:
+        if light and light[0] is not None and 'light' in keep:  # None: the mouse can't say its effect
             effect, rgb = keep['light'][0], tuple(keep['light'][1])
             colored = effect in ('static', 'breathing')  # the other effects have no colour to compare
             if light[0] != effect or (colored and light[1] != rgb):
@@ -1754,9 +1861,9 @@ class App(tk.Tk):
             fixed.append('brightness')
         return fixed
 
-    def remember(self, key, value):
+    def remember(self, key, value, model=None):
         """What you set here for this mouse, so it can be put back if Synapse changes it."""
-        self.cfg.setdefault('keep', {}).setdefault(self.model['name'], {})[key] = value
+        self.cfg.setdefault('keep', {}).setdefault((model or self.model)['name'], {})[key] = value
         self.write_cfg()
 
     def _synapse_done(self, names):
@@ -1804,11 +1911,16 @@ class App(tk.Tk):
         self.dpi_scale.enable(bool(has('dpi') and x))
         self.perf_note.configure(text='' if model.get('features') else
                                  f'There is no settings data for {model["name"]} yet, so these stay as they are.')
-        if x and self.focus_get() is not self.dpi_box:  # don't overwrite a number being typed
+        try:
+            typing = self.focus_get() is self.dpi_box
+        except KeyError:  # focus in a widget Tk doesn't wrap, such as an open dropdown list
+            typing = False
+        self._shown = {'dpi': self._shown.get('dpi'), 'hz': hz}
+        if x and not typing:  # don't overwrite a number being typed; what's shown is what the box holds
             self.dpi_var.set(str(x))
             self.dpi_scale.set(dpi_to_slider(x, self.dpi_rng))
+            self._shown['dpi'] = x
         self.poll_var.set(hz or 0)
-        self._shown = {'dpi': x, 'hz': hz}
         self.power['low'][0].set_range(*rs.low_power_range(model))
         for (key, (sc, _, _)), value in zip(self.power.items(), power or (None, None)):
             sc.enable(power is not None and has({'sleep': 'sleep', 'low': 'low_power'}[key]))
@@ -1820,7 +1932,7 @@ class App(tk.Tk):
             effect, rgb, bright = light
             if effect in ('static', 'breathing'):  # other effects read back no colour; keep the last one
                 self._rgb = rgb
-            self.light_var.set(effect)
+            self.light_var.set(effect if effect in LIGHT_NAMES else '')  # unknown or 'other': none picked
             self.show_color()
             self.bright.set(bright)
             self.bright_val.configure(text=f'{bright}%')
@@ -1833,7 +1945,8 @@ class App(tk.Tk):
                                  + f'. Profiles are saved in {os.path.dirname(CFG)}.')
         if self.tray:
             self.tray.title = 'FreeRazer' if battery is None else f'FreeRazer · battery {level}%'
-        if self._connected is False:  # back after being unplugged
+        # back after being unplugged, or the mouse that answered isn't the one shown (another one was opened)
+        if self._connected is False or model['name'] != self.model['name']:
             self._use_model(model)
             self._failed = None  # let auto-switch retry a profile that failed while it was away
             self.read_mouse()
@@ -1852,8 +1965,7 @@ class App(tk.Tk):
             return self.set_status(f'DPI must be {lo} to {hi}.')
         self._shown['dpi'] = dpi
         self.dpi_scale.set(dpi_to_slider(dpi, self.dpi_rng))
-        self.remember('dpi', dpi)
-        self._send(lambda: self.mouse.set_dpi(dpi), f'DPI set to {dpi}.')
+        self._send(lambda: self.mouse.set_dpi(dpi), f'DPI set to {dpi}.', ('dpi', dpi))
 
     def power_sliding(self, key, value):
         sc, val, unit = self.power[key]
@@ -1864,19 +1976,20 @@ class App(tk.Tk):
         if not self.power[key][0].on or v == self._shown.get(key):
             return
         self._shown[key] = v
-        self.remember(key, v)
         if key == 'sleep':
-            self._send(lambda: self.mouse.set_sleep(v), f'The mouse now sleeps after {v} min idle.')
+            self._send(lambda: self.mouse.set_sleep(v), f'The mouse now sleeps after {v} min idle.', (key, v))
         else:
-            self._send(lambda: self.mouse.set_low_power(v), f'Low power mode now starts below {v}% battery.')
+            self._send(lambda: self.mouse.set_low_power(v), f'Low power mode now starts below {v}% battery.', (key, v))
 
     def light_changed(self):
         effect, rgb = self.light_var.get(), self._rgb
         if (effect, rgb) == self._shown.get('light'):
             return
+        if effect not in LIGHT_NAMES:  # nothing picked (the mouse reported an effect FreeRazer doesn't offer)
+            return
         self._shown['light'] = (effect, rgb)
-        self.remember('light', [effect, list(rgb)])
-        self._send(lambda: self.mouse.set_lighting(effect, rgb), f'Lighting set to {LIGHT_NAMES[effect]}.')
+        self._send(lambda: self.mouse.set_lighting(effect, rgb), f'Lighting set to {LIGHT_NAMES[effect]}.',
+                   ('light', [effect, list(rgb)]))
 
     def show_color(self, rgb=None):
         """Swatch and preset ring follow `rgb` (default: the light's colour)."""
@@ -2020,8 +2133,7 @@ class App(tk.Tk):
         if not self.bright.on or v == self._shown.get('bright'):
             return
         self._shown['bright'] = v
-        self.remember('bright', v)
-        self._send(lambda: self.mouse.set_brightness(v), f'Brightness set to {v}%.')
+        self._send(lambda: self.mouse.set_brightness(v), f'Brightness set to {v}%.', ('bright', v))
 
     def dpi_sliding(self, value):
         """While the slider moves, only the number follows; the mouse is set when it is let go."""
@@ -2031,20 +2143,27 @@ class App(tk.Tk):
         hz = self.poll_var.get()
         if hz != self._shown.get('hz'):
             self._shown['hz'] = hz
-            self.remember('hz', hz)
-            self._send(lambda: self.mouse.set_polling(hz), f'Polling rate set to {hz} Hz.')
+            self._send(lambda: self.mouse.set_polling(hz), f'Polling rate set to {hz} Hz.', ('hz', hz))
 
-    def _send(self, write, done):
-        """Send a DPI or polling change off the main thread, then read back what the mouse reports."""
+    def _send(self, write, done, keep=None):
+        """Send a setting off the main thread, then read back what the mouse reports. keep=(key, value): what
+        to remember for the Synapse put-back, only once the mouse has taken it, and for the mouse it went to
+        (for a DPI change on a mouse with stages, the whole stage table)."""
         import threading
         import time
 
         def work():
             try:
-                write()
+                with self.mouse.lock:
+                    write()
+                    model = self.mouse.model
+                    kept = keep
+                    if keep and keep[0] == 'dpi' and rs.has(model, 'stages'):
+                        kept = ('stages', [list(s) for s in self.mouse.dpi_stages()[1]])
                 time.sleep(0.4)  # polling-rate changes take ~0.3 s to show up
                 info = self.read_info()
-                self._q.put(lambda: (self._device_done(info), self.set_status(done)))
+                self._q.put(lambda: (kept and self.remember(*kept, model=model), self._device_done(info),
+                                     self.set_status(done)))
             except (OSError, ValueError) as e:
                 msg = f'Could not change it: {e}'; self._q.put(lambda: self.set_status(msg))
         threading.Thread(target=work, daemon=True).start()
@@ -2058,23 +2177,33 @@ class App(tk.Tk):
         """Download the newest mouse database from the repo; it is checked in full before it is used or saved.
         The daily check (manual=False) only says something when the database changed."""
         import threading
+        if getattr(self, '_db_busy', False):  # one download at a time (a double click, or the daily check)
+            return
+        self._db_busy = True
         self.db_lbl.configure(text='Checking…')
         say = self.set_status if manual else lambda text: None
+        have = self.db and self.db['version']
+
+        def finish(then):
+            self._db_busy = False
+            then()
 
         def work():
             try:
                 db = json.loads(_curl(DB_URL, timeout=30))
                 rs.check_db(db)
-                if self.db and db['version'] <= self.db['version']:
-                    return self._q.put(lambda: (self.show_db(), say('The mouse database is up to date.')))
+                if have and db['version'] <= have:
+                    return self._q.put(lambda: finish(lambda: (self.show_db(), say('The mouse database is up to date.'))))
                 path = rs.db_paths()[1]
                 with open(path + '.new', 'w', encoding='utf-8') as f:
                     json.dump(db, f)
+                    f.flush()
+                    os.fsync(f.fileno())
                 os.replace(path + '.new', path)  # a half-written file never replaces a good one
-                self._q.put(lambda: self._db_done(db))
+                self._q.put(lambda: finish(lambda: self._db_done(db)))
             except (OSError, ValueError) as e:
                 msg = f'Could not update the mouse database: {e}'
-                self._q.put(lambda: (self.show_db(), say(msg)))
+                self._q.put(lambda: finish(lambda: (self.show_db(), say(msg))))
         threading.Thread(target=work, daemon=True).start()
 
     def _db_done(self, db):
@@ -2084,7 +2213,17 @@ class App(tk.Tk):
         self.show_db()
         self.mouse.choose(self.mouse.pid)  # reopened with the new data on the next read
         new = rs.model_for(self.model['pids'][0], self.model['name'])
-        if new['name'] == self.model['name']:
+        old = self.model['name']
+        if new['name'] != old and not self.model['verified']:
+            # the database names this mouse differently: what was confirmed and remembered for it moves along
+            # (a button already remapped can't be confirmed again, so losing these would lock it for good)
+            for key in ('confirmed', 'keep'):
+                if old in self.cfg.get(key, {}) and new['name'] not in self.cfg[key]:
+                    self.cfg[key][new['name']] = self.cfg[key].pop(old)
+            if old in self.mouse.confirmed:
+                self.mouse.confirmed.setdefault(new['name'], self.mouse.confirmed.pop(old))
+            self.write_cfg()
+        if new['name'] == old:
             self.model = new  # same mouse, maybe more settings
         else:
             self._use_model(new)
@@ -2140,7 +2279,8 @@ class App(tk.Tk):
     def _update_available(self, tag, assets, notes, manual):
         version = tag.lstrip('v')
         self._update_checked(f'Version {version} is available', manual)
-        if rs.foreground_exe() in self.cfg['links'] and not manual:  # never pop up mid-game: ask again in 5 min
+        # never pop up mid-game (a linked game, or anything full screen): ask again in 5 min
+        if not manual and (rs.foreground_exe() in self.cfg['links'] or fullscreen_foreground()):
             return self.after(300_000, lambda: self._update_available(tag, assets, notes, manual))
         if not self.installed():
             return self.set_status(f'Version {version} is available. Install it with FreeRazerSetup.exe.')
@@ -2164,7 +2304,7 @@ class App(tk.Tk):
 
         def work():
             try:
-                path = download_update(assets)
+                path = download_update(tag, assets)
                 self._q.put(lambda: self._install_update(tag, path))
             except (OSError, ValueError, KeyError) as e:
                 msg = f'The update could not be downloaded: {e}'
@@ -2239,7 +2379,7 @@ class App(tk.Tk):
         if not path:
             return
         try:
-            added = import_file(path, self.cfg['profiles'], self.editable)
+            added = import_file(path, self.cfg['profiles'])
         except (OSError, ValueError) as e:
             return self.set_status(f'Could not import {os.path.basename(path)}: {e}')
         self.write_cfg()
@@ -2248,24 +2388,28 @@ class App(tk.Tk):
         self.set_status(f'Imported {", ".join(added)}.')
 
 
-def import_file(path, profiles, editable):
+def import_file(path, profiles):
     """Add the profiles in an exported file to `profiles`; returns the names used. Checks every button and
     action first (the file may come from anyone), and renames on a clash instead of overwriting."""
     with open(path, encoding='utf-8-sig') as f:  # -sig: files saved with a BOM too
         data = json.load(f)
     if not isinstance(data, dict) or not isinstance(data.get('profiles'), dict) or not data['profiles']:
         raise ValueError('not a FreeRazer export')
-    clean = {}
+    clean = []  # (name, binding); 'A' and 'A ' are both kept and get numbered below like any clash
     for name, binding in data['profiles'].items():
         if not isinstance(name, str) or not name.strip() or name.strip().lower() == 'default' or not isinstance(binding, dict):
             raise ValueError(f'bad profile {name!r}')
+        own = {}
         for b, action in binding.items():
-            if not str(b).isdigit() or int(b) not in editable:
-                raise ValueError(f'"{self.shown(name)}" uses a button this mouse does not have ({b})')
-            rs.encode(action)  # raises ValueError for anything that is not a known action
-        clean[name.strip()[:60]] = {str(b): a for b, a in binding.items()}
+            if not isinstance(b, str) or not b.isdigit() or not 2 <= int(b) <= 255:
+                raise ValueError(f'"{name}" has a button that isn\'t one ({b!r}); left click can\'t be changed')
+            # stored the way the mouse reads it back, so it compares equal to what is on the mouse;
+            # rs.encode raises ValueError for anything that is not a known action
+            own[str(int(b))] = 'default' if action == 'default' else rs.decode(*rs.encode(action))
+        # buttons this mouse doesn't have are kept: profiles work across models and those are skipped there
+        clean.append((name.strip()[:60], own))
     added = []
-    for name, binding in clean.items():
+    for name, binding in clean:
         new, n = name, 2
         while new in profiles:
             new, n = f'{name} ({n})', n + 1

@@ -17,7 +17,7 @@ fr.App.check_updates = lambda self, manual=False: None
 ctypes.windll.shcore.SetProcessDpiAwareness(1)
 app = fr.App()
 app.write_cfg = lambda: None
-app._send = lambda write, done: print('  would send:', done, flush=True)
+app._send = lambda write, done, keep=None: print('  would send:', done, flush=True)
 app.deiconify()
 app.attributes('-topmost', True)
 ok = []

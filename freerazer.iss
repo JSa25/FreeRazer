@@ -60,8 +60,27 @@ begin
     RegDeleteValue(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Run', 'Mouse Profiles');
     if (not UninstallSilent) and (MsgBox('Also delete your FreeRazer profiles?' + #13#10 +
         'Choose No to keep them for a reinstall.', mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES) then
+    begin
       DelTree(ExpandConstant('{userappdata}\FreeRazer'), True, True, True);
+      // the app copies an old Mouse Profiles folder back in when its own is missing: remove that too
+      DelTree(ExpandConstant('{userappdata}\MouseProfiles'), True, True, True);
+    end;
   end;
+end;
+
+function InitializeSetup(): Boolean;
+var
+  i: Integer;
+begin
+  // the in-app updater starts Setup a few seconds after FreeRazer closes; if it is slow to exit, wait (up to
+  // 20 s) instead of failing the AppMutex check, which a silent install can't ask about
+  i := 0;
+  while WizardSilent and CheckForMutexes('FreeRazerSingleInstance') and (i < 40) do
+  begin
+    Sleep(500);
+    i := i + 1;
+  end;
+  Result := True;
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);

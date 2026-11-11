@@ -101,6 +101,9 @@ def daemon_devices(py_source):
             continue
         dpi, _ = get(cls, 'DPI_MAX')
         m = re.search(r'Class for the (Razer [^\n]+)', d['doc'])
-        out[pid.value] = {'name': m.group(1).strip() if m else cls, 'methods': methods(cls),
+        # no docstring of its own: the class name spelled out ('RazerBasiliskUltimateReceiver' ->
+        # 'Razer Basilisk Ultimate Receiver')
+        name = m.group(1).strip() if m else re.sub(r'(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Za-z])(?=[0-9])', ' ', cls)
+        out[pid.value] = {'name': name, 'methods': methods(cls),
                           'dpi_max': dpi.value if isinstance(dpi, ast.Constant) else None}
     return out

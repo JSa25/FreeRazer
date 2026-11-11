@@ -62,7 +62,7 @@ def put_back():
     sent = []
     want = app.resolved(app.cfg.get('active', 'default'))
     real = app.mouse
-    app.mouse = types.SimpleNamespace(set_dpi=None, set_polling=None, set_sleep=None, set_low_power=None,model=da, get_action=lambda b: want.get(b), write=lambda w: sent.append('buttons'),
+    app.mouse = types.SimpleNamespace(lock=threading.RLock(), set_dpi=None, set_polling=None, set_sleep=None, set_low_power=None,model=da, get_action=lambda b: want.get(b), write=lambda w: sent.append('buttons'),
                                       set_lighting=lambda e, rgb: sent.append(('light', e, rgb)),
                                       set_brightness=lambda v: sent.append(('bright', v)))
     app.cfg['keep'] = {da['name']: {'light': ['static', [255, 0, 0]], 'bright': 33}}
