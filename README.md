@@ -150,7 +150,7 @@ The app only reads and sets button bindings, DPI, polling rate, power saving (sl
 - Problems are written to `%APPDATA%\FreeRazer\error.log` (Settings > Open error log), and the window says when one happens.
 - Profiles are stored in `%APPDATA%\FreeRazer\profiles.json`. A `profiles.json` from an older version next to the app is copied there on first start (the old file is left as a backup).
 
-Works alongside Razer Synapse (tested with Synapse 4), for example if you keep Synapse for a Razer keyboard. Synapse leaves the mouse alone in the background, but opening the mouse in Synapse's window writes Synapse's own settings to it; FreeRazer notices within 30 seconds and puts yours back.
+Works alongside Razer Synapse, for example if you keep Synapse for a Razer keyboard. Synapse leaves the mouse alone in the background, but opening the mouse in Synapse's window writes Synapse's own settings to it; FreeRazer notices within 30 seconds and puts yours back.
 
 ## Running from source
 
@@ -211,8 +211,6 @@ Installed copies check GitHub Releases at most once a day (or when you click Che
 
 **Buttons** aren't in OpenRazer, so they're checked on the mouse itself. When a mouse connects, FreeRazer reads its usual buttons (right click, scroll click and up/down, the two side buttons). Each one that answers with its own factory action is a real button and can be remapped from then on. One that answers with anything else (already remapped in Synapse, say) stays as it is; resetting the mouse to factory settings in Synapse unlocks it. Button IDs that aren't real buttons answer with leftover memory, which never spells out a factory action, so nothing is ever written to them.
 
-The Viper V4 Pro and DeathAdder V2 Pro were also tested by hand here and have their own entries in `DEVICES` in `razer_switch.py`.
-
 ## Mouse not listed?
 
 For a Razer mouse that isn't in the [supported mice](#supported-mice) list. The list comes from OpenRazer, so once OpenRazer supports a new mouse it reaches FreeRazer by itself within a week. To get one added sooner, or one OpenRazer doesn't have, you need the mouse and a few minutes. Nothing is written to the mouse.
@@ -239,7 +237,7 @@ Mice without their own drawing get a generic one (`'drawing': 'generic'`).
 
 FreeRazer stands on the work of the [OpenRazer](https://github.com/openrazer/openrazer) project, the open-source Razer driver for Linux. The supported mice list, the mouse database (`devices.json`) and the lighting commands all come from what OpenRazer's contributors worked out. FreeRazer contains none of OpenRazer's code: `tools/gen_devices.py` reads their driver source and keeps only the facts (device IDs, names, which command each mouse takes). OpenRazer is licensed GPL-2.0. If you use Linux, use OpenRazer.
 
-Built with help from AI: much of the code, the tests and this README were written with Claude (by Anthropic), and tested on the author's own Viper V4 Pro and DeathAdder V2 Pro.
+Built with help from AI: much of the code, the tests and this README were written with Claude (by Anthropic).
 
 FreeRazer is not affiliated with or endorsed by Razer or the OpenRazer project.
 
