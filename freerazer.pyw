@@ -107,7 +107,7 @@ def leader(b):
     return [(CX + s * (REACH + 45), y), (CX + s * REACH, y), (CX + s * (REACH - 35), y), (CX + tx, ty)]
 
 
-APP_VERSION = '1.0.1'  # build.ps1 reads this; bump it for every release
+APP_VERSION = '1.0.2'  # build.ps1 reads this; bump it for every release
 UPDATE_REPO = 'JSa25/freerazer'  # GitHub repo whose Releases carry the installer
 SETUP_ASSET = 'FreeRazerSetup.exe'  # release asset, plus SETUP_ASSET + '.sha256'
 DB_URL = f'https://raw.githubusercontent.com/{UPDATE_REPO}/master/{rs.DB_FILE}'  # the mouse database, kept in the repo
