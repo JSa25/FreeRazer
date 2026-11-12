@@ -11,6 +11,7 @@ fr.rs.mice = lambda: [i for i in orig() if i['product_id'] == 0x7D]
 fr.App.check_updates = lambda self, manual=False: None
 ctypes.windll.shcore.SetProcessDpiAwareness(1)
 app = fr.App()
+import test_screen; test_screen.place(app)  # FR_TEST_SCREEN: keep test windows on a chosen monitor
 app.write_cfg = lambda: None
 app.show_window() if hasattr(app, 'show_window') else app.deiconify()
 app.attributes('-topmost', True)

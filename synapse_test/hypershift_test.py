@@ -13,6 +13,7 @@ fr.App.check_updates = lambda self, manual=False: None
 fr.App.refresh_device = lambda self, repeat=True: None
 ctypes.windll.shcore.SetProcessDpiAwareness(1)
 app = fr.App()
+import test_screen; test_screen.place(app)  # FR_TEST_SCREEN: keep test windows on a chosen monitor
 app.write_cfg = lambda: True
 app.deiconify()
 app.attributes('-topmost', True)
@@ -51,9 +52,10 @@ def run():
     shot('standard')
     # HyperShift layer
     app.layer_var.set(HS); app.set_layer()
+    import time; time.sleep(0.3); app.update()  # let the labels finish fading in
     check('HyperShift key locked on the HyperShift layer', app.labels and app.canvas.itemcget(app.labels[5][0], 'fill') == fr.DIM)
     app.select(5)
-    check('clicking it explains', 'HyperShift key' in app.status.cget('text') and not app.pop_open)
+    check('clicking it explains', 'HyperShift key' in app.last_status and not app.pop_open)
     app.select(4)
     app.mode_var.set('mouse'); app.show_mode()
     check('HyperShift not offered on the HyperShift layer', 'hypershift' not in app.pick_items)
@@ -70,7 +72,7 @@ def run():
     check(f'14 buttons written ({len(sent)})', len(sent) == 14)
     check('HyperShift key on both layers', '01 05 00 0c 01 01 00' in sent and '01 05 01 0c 01 01 00' in sent)
     check('F9 on HyperShift layer button 4', '01 04 01 02 02 00 42' in sent and '01 04 00 01 01 04 00' in sent)
-    print('status:', app.status.cget('text'), flush=True)
+    print('status:', app.last_status, flush=True)
     # any other mouse: the DeathAdder V2 Pro on stand-ins, one that has the layer and one that ignores it
     da = rs.model_for(0x007D)
     for store, has in (('layers', True), ('ignore', False)):
@@ -90,7 +92,7 @@ def run():
         want = {b: 'hypershift' if b == 5 else a for b, a in rs.resolve({}, None, da).items() if not b & HS}
         check(f'{store}: normal buttons right on the mouse', normal == (want if has else {
             b: a for b, a in rs.resolve({}, None, da).items() if not b & HS}))
-        print('  status:', app.status.cget('text'), flush=True)
+        print('  status:', app.last_status, flush=True)
         app.read_mouse()
         check(f'{store}: read back as the profile', app.cfg['active'] == 'HS test' or not has)
         if not has:

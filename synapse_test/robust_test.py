@@ -11,6 +11,7 @@ fr.App.check_updates = lambda self, manual=False: None
 fr.App.refresh_device = lambda self, repeat=True: None
 ctypes.windll.shcore.SetProcessDpiAwareness(1)
 app = fr.App()
+import test_screen; test_screen.place(app)  # FR_TEST_SCREEN: keep test windows on a chosen monitor
 app.write_cfg = lambda: None
 ok = []
 
@@ -31,7 +32,7 @@ def window_error():
 
 def thread_error():
     check('window error logged', 'error in the window' in log() and 'ZeroDivisionError' in log())
-    check('window error shown', 'Something went wrong' in app.status.cget('text'))
+    check('window error shown', 'Something went wrong' in app.last_status)
     app.set_status('')
     t = threading.Thread(target=lambda: [][1])
     t.start(); t.join()
@@ -40,7 +41,7 @@ def thread_error():
 
 def after_thread():
     check('background error logged', 'error in background work' in log() and 'IndexError' in log())
-    check('background error shown', 'Something went wrong' in app.status.cget('text'))
+    check('background error shown', 'Something went wrong' in app.last_status)
     with open(fr.LOG, 'a', encoding='utf-8') as f:
         f.write('x' * 80 + '\n' * 1 + ('y' * 99 + '\n') * 8000)  # ~800 KB
     try:

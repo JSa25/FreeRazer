@@ -16,6 +16,7 @@ rs.db_paths = lambda: (shipped, os.path.join(tmp, 'devices.json'))
 fr.App.check_updates = lambda self, manual=False: None
 ctypes.windll.shcore.SetProcessDpiAwareness(1)
 app = fr.App()
+import test_screen; test_screen.place(app)  # FR_TEST_SCREEN: keep test windows on a chosen monitor
 app.write_cfg = lambda: None
 app._send = lambda write, done, keep=None: print('  would send:', done, flush=True)
 app.deiconify()
@@ -88,7 +89,7 @@ def after_update(before):
     check(f'update took the newer file ({before} -> {len(rs.DB)} mice)', len(rs.DB) == before + 1 and 0x0BEE in rs.DB)
     check('saved for next start', os.path.exists(rs.db_paths()[1]))
     shot('settings') if app.show_page('settings') is None else None
-    print('status:', app.status.cget('text'), '|', app.db_lbl.cget('text'), flush=True)
+    print('status:', app.last_status, '|', app.db_lbl.cget('text'), flush=True)
     bad = os.path.join(tmp, 'bad.json')
     json.dump({'version': 99999999, 'mice': [{'pid': 1, 'name': 'x', 'txn': {'020c': 1}}]}, open(bad, 'w'))
     fr.DB_URL = 'file:///' + bad.replace('\\', '/')
@@ -97,7 +98,7 @@ def after_update(before):
 
 
 def after_bad():
-    check('bad file refused and not saved', 'Could not update' in app.status.cget('text') and 0x0BEE in rs.DB
+    check('bad file refused and not saved', 'Could not update' in app.last_status and 0x0BEE in rs.DB
           and json.load(open(rs.db_paths()[1]))['version'] != 99999999)
     check('no errors logged', not os.path.exists(fr.LOG))
     print('all ok' if all(ok) else 'SOME FAILED', flush=True)

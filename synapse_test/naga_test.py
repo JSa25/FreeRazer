@@ -13,6 +13,7 @@ fr.App.check_updates = lambda self, manual=False: None
 fr.App.refresh_device = lambda self, repeat=True: None
 ctypes.windll.shcore.SetProcessDpiAwareness(1)
 app = fr.App()
+import test_screen; test_screen.place(app)  # FR_TEST_SCREEN: keep test windows on a chosen monitor
 app.write_cfg = lambda: True
 app.deiconify()
 ok = []
@@ -35,7 +36,7 @@ def run():
     app.read_mouse()
     std = [b for b in app.editable if not b & rs.HS]
     check(f'all 20 buttons unlocked ({len(std)})', len(std) == 20 and 4 not in app.buttons)
-    check('mouse read as Default', app.cfg['active'] == 'default' or 'Default' in app.status.cget('text'))
+    check('mouse read as Default', app.cfg['active'] == 'default' or 'Default' in app.last_status)
     shown = [app.canvas.itemcget(app.labels[b][0], 'text') for b in (0x0B, 0x34, 0x40, 0x4B)]
     print('  labels:', shown, flush=True)
     check('More buttons labels', shown == ['Top Thumb Button:  DPI (factory)', 'Tilt Left:  Tilt (factory)',
@@ -58,7 +59,7 @@ def run():
     check('F13 on Side Button 1', fake.get_action(0x40) == 'f13')
     check('factory actions written back exactly', all(fake.get_action(b) == a for b, (_, a) in naga['buttons'].items()
                                                       if b not in (1, 0x40)))
-    print('  status:', app.status.cget('text'), flush=True)
+    print('  status:', app.last_status, flush=True)
     print('all ok' if all(ok) else 'SOME FAILED', flush=True)
     app.quit_app()
 

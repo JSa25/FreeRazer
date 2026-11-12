@@ -14,6 +14,7 @@ sent = []
 real_transact = rs.transact
 rs.transact = lambda dev, pkt, tries=25: (sent.append(bytes(pkt[6:8])), real_transact(dev, pkt, tries))[1]
 app = fr.App()
+import test_screen; test_screen.place(app)  # FR_TEST_SCREEN: keep test windows on a chosen monitor
 app.write_cfg = lambda: True
 app.deiconify()
 app.attributes('-topmost', True)
@@ -49,7 +50,7 @@ def wait(n=0):
     check('report copied', text.startswith(f'FreeRazer {fr.APP_VERSION}\nRazer HID devices:') and 'PID 0x00e6' in text)
     check('every button ID read', all(f'  {b:#04x} ' in text for b in range(1, 0x80)))
     check(f'only reads sent ({len(sent)} commands)', sent and all(c[1] & 0x80 for c in sent))
-    check('status says copied', 'copied' in app.status.cget('text'))
+    check('status says copied', 'copied' in app.last_status)
     check('no errors logged', not os.path.exists(fr.LOG) or 'mouse report' not in open(fr.LOG, encoding='utf-8').read())
     shot('settings')
     print('all ok' if all(ok) else 'SOME FAILED', flush=True)

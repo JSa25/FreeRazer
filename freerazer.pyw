@@ -60,6 +60,17 @@ def log_error(where, exc=None):
             f.write(f'{time.strftime("%Y-%m-%d %H:%M:%S")} FreeRazer {APP_VERSION} {where}\n{text}\n')
     except OSError:
         pass
+
+
+def log_event(text):
+    """One line in error.log for starts and stops, so 'it closed' or 'it didn't start' can be traced:
+    a start with no stop before the next start means the process was killed or Windows ended it."""
+    import time
+    try:
+        with open(LOG, 'a', encoding='utf-8') as f:
+            f.write(f'{time.strftime("%Y-%m-%d %H:%M:%S")} FreeRazer {APP_VERSION} {text}\n')
+    except OSError:
+        pass
 BG, SIDE, PANEL, LINE, LEADER = '#1b1c1f', '#151619', '#26282d', '#7c818a', '#474b53'
 FG, MUTED, DIM, ACCENT, ACCENT_DIM, SEL_FILL = '#e8e8e8', '#9aa0aa', '#5c6169', '#44d62c', '#2f6b27', '#1d2b1a'
 FONT = ('Segoe UI', 10)
@@ -108,7 +119,7 @@ def leader(b):
     return [(CX + s * (REACH + 45), y), (CX + s * REACH, y), (CX + s * (REACH - 35), y), (CX + tx, ty)]
 
 
-APP_VERSION = '1.0.4'  # build.ps1 reads this; bump it for every release
+APP_VERSION = '1.0.5'  # build.ps1 reads this; bump it for every release
 UPDATE_REPO = 'JSa25/freerazer'  # GitHub repo whose Releases carry the installer
 SETUP_ASSET = 'FreeRazerSetup.exe'  # release asset, plus SETUP_ASSET + '.sha256'
 DB_URL = f'https://raw.githubusercontent.com/{UPDATE_REPO}/master/{rs.DB_FILE}'  # the mouse database, kept in the repo
@@ -247,6 +258,31 @@ def round_corners(win):
             ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, attr, ctypes.byref(ctypes.c_int(value)), 4)
     except (OSError, ValueError, AttributeError):
         pass
+
+
+def animations_on():
+    """Windows' own 'Animation effects' switch (Accessibility > Visual effects): off means no motion here either."""
+    on = ctypes.c_int(1)
+    try:
+        ctypes.windll.user32.SystemParametersInfoW(0x1042, 0, ctypes.byref(on), 0)  # SPI_GETCLIENTAREAANIMATION
+    except (AttributeError, OSError):
+        pass
+    return bool(on.value)
+
+
+ANIMATE = animations_on()
+ease_out = lambda t: 1 - (1 - t) ** 3
+
+
+def blend(a, b, t):
+    """The colour t of the way from #rrggbb a to b."""
+    x, y = int(a[1:], 16), int(b[1:], 16)
+    return '#' + ''.join(f'{round((x >> s & 255) * (1 - t) + (y >> s & 255) * t):02x}' for s in (16, 8, 0))
+
+
+# messages that report a problem get an amber dot instead of a green one
+TOAST_WARN = re.compile(r"^(Could not|Something went wrong|Mouse not found|Mouse disconnected|No button)|can't|"
+                        r"must be|already exists|Pick a name|Make a profile first|is locked|is your HyperShift key")
 
 
 def chevron_image(up, color, k=1.0):
@@ -475,6 +511,7 @@ def migrate_startup():
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
+        self._anims, self._toasts, self._pal, self.last_status, self._bat = {}, [], None, '', None
         self.title('FreeRazer')
         self.configure(bg=BG)
         try:
@@ -599,6 +636,10 @@ class App(tk.Tk):
         self.close_popover()
         self.layer = self.layer_var.get()
         self.redraw()
+        # the new layer's labels fade in, so the switch reads as a change of layer, not a flicker
+        c = self.canvas
+        colors = {item: c.itemcget(item, 'fill') for item, in self.labels.values()}
+        self.animate('layer', 180, lambda t: [c.itemconfigure(i, fill=blend(BG, col, t)) for i, col in colors.items()])
         if self.layer and not any(self.hs_key(b) for b in self.buttons):
             self.set_status('No button is the HyperShift key in this profile yet. On Standard, pick a button and '
                             'set it to Mouse > Razer HyperShift.')
@@ -699,6 +740,8 @@ class App(tk.Tk):
         self.toggle_startup()
 
     def quit_app(self):
+        if getattr(sys, 'frozen', False):  # the installed app only: test runs from source end through here too
+            log_event('quit from the menu')
         if self.tray:
             self.tray.stop()
         self.destroy()
@@ -752,6 +795,7 @@ class App(tk.Tk):
         s.map('Accent.TButton', background=[('active', '#5fe84a')])
         s.configure('Pop.TFrame', background=PANEL)
         s.configure('PopMuted.TLabel', background=PANEL, foreground=MUTED)
+        s.configure('Pop.TLabel', background=PANEL)
         s.configure('PopSmall.TLabel', background=PANEL, foreground=DIM, font=('Segoe UI', 9))
         s.configure('PopBig.TLabel', background=PANEL, font=('Segoe UI Semibold', 15))
         s.configure('PopBigOn.TLabel', background=PANEL, foreground=ACCENT, font=('Segoe UI Semibold', 15))
@@ -939,7 +983,9 @@ class App(tk.Tk):
                   style='Muted.TLabel', wraplength=round(620 * k)).pack(anchor='w', pady=(4, 16))
         self.games_list = ttk.Frame(pg)
         self.games_list.pack(fill='x')
-        ttk.Button(pg, text='+ Add a game…', style='Link.TButton', command=self.link_game).pack(anchor='w', pady=(12, 0))
+        self.add_game_btn = ttk.Button(pg, text='+ Add games…', style='Link.TButton',
+                                       command=lambda: self.add_game_menu(self.add_game_btn))
+        self.add_game_btn.pack(anchor='w', pady=(12, 0))
 
         # Settings: the app itself
         pg = self.pages['settings']
@@ -989,8 +1035,9 @@ class App(tk.Tk):
         ttk.Button(row, text='Open error log', command=self.open_log).pack(side='left')
         ttk.Button(row, text='Quit FreeRazer', command=self.quit_app).pack(side='left', padx=(8, 0))
 
-        self.status = ttk.Label(self, style='Muted.TLabel')
-        self.status.grid(row=4, column=0, sticky='w', padx=24, pady=(0, 16))
+        self.bind('<Button-1>', self.click_away, add='+')
+        self.bind('<Control-k>', self.palette)
+        self.bind('<Control-K>', self.palette)  # with Caps Lock on
         # the smallest window that fits every page (Lighting included); measured while all pages are stacked
         self.light_box.pack(anchor='w', before=self.perf_note)
         self.update_idletasks()
@@ -1048,7 +1095,7 @@ class App(tk.Tk):
 
     def open_popover(self):
         """Place the editor under the selected button's label, or above it when there's no room below."""
-        self.pop_open = True
+        was_open, self.pop_open = self.pop_open, True
         self.update_idletasks()
         x0, y0, x1, y1 = self.canvas.bbox(self.labels[self.sel][0])
         cx, cy = self.canvas.winfo_x(), self.canvas.winfo_y()
@@ -1064,11 +1111,28 @@ class App(tk.Tk):
             self.pop.place(x=x - PAGE_PAD, y=y - PAGE_PAD)  # place measures from inside the page's padding
             self.pop.lift()
             self.update_idletasks()
+        if not was_open:  # opening, not following a resize: settle into place from a little lower
+            rise = round(8 * self.k)
+            self.animate('pop', 140, lambda t: self.pop.place_configure(y=y - PAGE_PAD + round(rise * (1 - t))))
+
+    def click_away(self, e):
+        """A click anywhere in the window outside the button editor closes it. The picture handles its own clicks
+        (another button opens its editor) and toasts can be dismissed without losing the editor."""
+        w = str(e.widget)
+        if self.pop_open and e.widget is not self.canvas and not w.startswith(str(self.pop)) \
+                and not any(w.startswith(str(t)) for t in self._toasts):
+            self.close_popover()
 
     def close_popover(self):
         self.stop_record()
+        try:
+            had_focus = str(self.focus_get() or '').startswith(str(self.pop))
+        except KeyError:  # focus in a widget Tk doesn't wrap, such as a combobox list
+            had_focus = False
         self.pop.place_forget()
         self.pop_open = False
+        if had_focus:  # back to the picture, so the arrow keys keep going from the same button
+            self.canvas.focus_set()
 
     def show_page(self, key):
         self.close_popover()
@@ -1106,20 +1170,24 @@ class App(tk.Tk):
             s.map(style, background=[])
 
         hover = '#2e333d'
-        button('TButton', [(None, PANEL, None), ('pressed', hover, None), ('active', hover, None)], BG)
-        button('Accent.TButton', [(None, ACCENT, None), ('active', '#5fe84a', None)], BG)
+        # every control shows keyboard focus (Tab) with an outline in the accent's dim green
+        button('TButton', [(None, PANEL, None), ('pressed', hover, None), ('focus', PANEL, ACCENT_DIM),
+                           ('active', hover, None)], BG)
+        button('Accent.TButton', [(None, ACCENT, None), ('active', '#5fe84a', None), ('focus', '#5fe84a', None)], BG)
         s.configure('Head.Accent.TButton', background=SIDE, focuscolor=SIDE)
-        button('Field.TButton', [(None, SIDE, None), ('active', BG, None)], PANEL)
+        button('Field.TButton', [(None, SIDE, None), ('active', BG, None), ('focus', SIDE, ACCENT_DIM)], PANEL)
         button('Rec.TButton', [(None, SEL_FILL, ACCENT_DIM)], PANEL)
         for name in ('Link.TButton', 'HeadLink.TButton', 'PopLink.TButton', 'Nav.TButton', 'NavOn.TButton'):
             s.layout(name, plain)
-        button('Seg.Toolbutton', [(None, PANEL, None), ('selected', SEL_FILL, ACCENT_DIM), ('active', hover, None)], BG,
-               'Toolbutton')
-        button('PopSeg.Toolbutton', [(None, SIDE, None), ('selected', SEL_FILL, ACCENT_DIM), ('active', BG, None)], PANEL,
-               'Toolbutton')
+            s.map(name, foreground=[('disabled', DIM), ('focus', ACCENT), ('active', FG)])
+        button('Seg.Toolbutton', [(None, PANEL, None), ('selected', SEL_FILL, ACCENT_DIM), ('focus', PANEL, ACCENT_DIM),
+                                  ('active', hover, None)], BG, 'Toolbutton')
+        button('PopSeg.Toolbutton', [(None, SIDE, None), ('selected', SEL_FILL, ACCENT_DIM), ('focus', SIDE, ACCENT_DIM),
+                                     ('active', BG, None)], PANEL, 'Toolbutton')
         s.configure('Head.TButton', background=SIDE, focuscolor=SIDE, padding=(10, 3))  # mouse picker in the header
-        # drop-down menu rows (see popup)
-        button('Menu.TButton', [(None, PANEL, None), ('disabled', PANEL, None), ('active', hover, None)], PANEL)
+        # drop-down menu rows (see popup); the focused row is the highlighted one, for the mouse and the arrow keys
+        button('Menu.TButton', [(None, PANEL, None), ('disabled', PANEL, None), ('focus', hover, None),
+                                ('active', hover, None)], PANEL)
         s.configure('Menu.TButton', anchor='w', padding=(12, 6))
         s.map('Menu.TButton', foreground=[('disabled', DIM)])
         s.configure('On.Menu.TButton', foreground=ACCENT)  # the item that is picked now
@@ -1331,8 +1399,176 @@ class App(tk.Tk):
         elif not self.canvas.find_withtag('current'):  # empty space closes the editor
             self.close_popover()
 
+    def animate(self, key, ms, step, done=None):
+        """Call step(t) with t easing from 0 to 1 over ms; a newer animation with the same key replaces it.
+        With Windows' animation effects off, it jumps straight to the end."""
+        self.stop_anim(key)
+        start = time.monotonic()
+
+        def tick():
+            t = min(1.0, (time.monotonic() - start) * 1000 / ms) if ANIMATE and ms > 0 else 1.0
+            try:
+                step(ease_out(t))
+            except tk.TclError:  # the widget went away mid-animation
+                return self._anims.pop(key, None)
+            if t < 1:
+                self._anims[key] = self.after(16, tick)
+            else:
+                self._anims.pop(key, None)
+                if done:
+                    done()
+        tick()
+
+    def stop_anim(self, key):
+        if key in self._anims:
+            self.after_cancel(self._anims.pop(key))
+
     def set_status(self, text):
-        self.status.configure(text=text)
+        """Every message shows as a toast in the lower right; last_status keeps the newest for tests."""
+        self.last_status = text
+        if text:
+            self.toast(text)
+
+    # ---------- toasts ----------
+    def toast(self, text):
+        k = self.k
+        if self._toasts and self._toasts[-1].text == text:  # the same message again: keep it up longer
+            return self._toast_timer(self._toasts[-1])
+        card = ttk.Frame(self, style='Card.TFrame', padding=round(4 * k))
+        card.text = text
+        inner = ttk.Frame(card, style='Pop.TFrame', padding=(10, 8))
+        inner.pack(fill='both')
+        tk.Label(inner, text='●', bg=PANEL, fg=WARN if TOAST_WARN.search(text) else ACCENT,
+                 font=('Segoe UI', 8)).pack(side='left', anchor='n', pady=(2, 0))
+        ttk.Label(inner, text=text, style='Pop.TLabel', wraplength=round(340 * k), justify='left').pack(
+            side='left', padx=(8, 10))
+        ttk.Button(inner, text='✕', style='PopLink.TButton', takefocus=0,
+                   command=lambda: self._drop_toast(card)).pack(side='left', anchor='n')
+        # like Sonner: the pointer over a toast keeps it up
+        card.bind('<Enter>', lambda e: card.after_id and self.after_cancel(card.after_id))
+        card.bind('<Leave>', lambda e: self._toast_timer(card, 2000)
+                  if not str(self.winfo_containing(*self.winfo_pointerxy()) or '').startswith(str(card)) else None)
+        card.after_id = None
+        self._toasts.append(card)
+        if len(self._toasts) > 3:
+            self._drop_toast(self._toasts[0])
+        self._toast_timer(card)
+        self._stack_toasts(card)
+
+    def _toast_timer(self, card, ms=None):
+        if card.after_id:
+            self.after_cancel(card.after_id)
+        card.after_id = self.after(ms or min(10_000, 4000 + 40 * len(card.text)), lambda: self._drop_toast(card))
+
+    def _stack_toasts(self, new=None):
+        """Newest at the bottom right; the others glide up to make room."""
+        k = self.k
+        margin, y = round(16 * k), -round(16 * k)
+        for card in reversed(self._toasts):
+            card.update_idletasks()
+            start = y + round(28 * k) if card is new else getattr(card, 'y', y)
+            card.y = y
+            self.animate(f'toast{id(card)}', 220, lambda t, c=card, a=start, b=y: c.place(
+                in_=self, relx=1, rely=1, x=-margin, y=round(a + (b - a) * t), anchor='se'))
+            card.lift()
+            y -= card.winfo_reqheight() + round(8 * k)
+
+    def _drop_toast(self, card):
+        if card not in self._toasts:
+            return
+        self._toasts.remove(card)
+        if card.after_id:
+            self.after_cancel(card.after_id)
+        self._stack_toasts()
+        w = card.winfo_width() + round(16 * self.k)
+        self.animate(f'toast{id(card)}', 180, lambda t: card.place_configure(x=round(-16 * self.k + w * t)),
+                     done=card.destroy)
+
+    # ---------- Ctrl+K: find anything ----------
+    def palette(self, e=None):
+        if self.recording:  # Ctrl+K is a combo being recorded, not a request for the switcher
+            return self.on_key(e)
+        if self._pal and self._pal.winfo_exists():
+            return self._pal.close(True)
+        if self.state() == 'withdrawn':
+            return
+        k = self.k
+        top = self._pal = tk.Toplevel(self, bg=PANEL, padx=round(6 * k), pady=round(6 * k))
+        top.overrideredirect(True)
+        top.attributes('-topmost', True)
+        top.attributes('-alpha', 0.0)
+        query = tk.StringVar()
+        entry = tk.Entry(top, textvariable=query, bg=SIDE, fg=FG, insertbackground=FG, relief='flat', bd=round(8 * k),
+                         font=('Segoe UI', 11), highlightthickness=0, width=46)
+        entry.pack(fill='x')
+        lst = tk.Listbox(top, height=9, bg=PANEL, fg=FG, selectbackground=SEL_FILL, selectforeground=ACCENT, bd=0,
+                         highlightthickness=0, activestyle='none', font=FONT, exportselection=False, takefocus=0)
+        lst.pack(fill='both', pady=(round(6 * k), 0))
+        ttk.Label(top, text='↑ ↓ to move · Enter to run · Esc to close', style='PopSmall.TLabel').pack(
+            anchor='w', padx=round(4 * k), pady=(round(4 * k), 0))
+        items = self.palette_items()
+
+        def refresh(*_):
+            q = query.get().strip().lower()
+            top.shown = [it for it in items if all(w in it[0].lower() for w in q.split())]
+            top.shown.sort(key=lambda it: not it[0].lower().startswith(q))  # stable: starts-with first
+            lst.delete(0, 'end')
+            for text, _ in top.shown:
+                lst.insert('end', '  ' + text)
+            if top.shown:
+                lst.selection_set(0)
+                lst.see(0)
+
+        def move(step):
+            if top.shown:
+                i = ((lst.curselection() or (0,))[0] + step) % len(top.shown)
+                lst.selection_clear(0, 'end')
+                lst.selection_set(i)
+                lst.see(i)
+            return 'break'
+
+        def run(_=None):
+            pick = lst.curselection()
+            if top.shown and pick:
+                top.close(True)
+                top.shown[pick[0]][1]()
+            return 'break'
+        query.trace_add('write', refresh)
+        entry.bind('<Down>', lambda e: move(1))
+        entry.bind('<Up>', lambda e: move(-1))
+        entry.bind('<Return>', run)
+        entry.bind('<Control-k>', lambda e: top.close(True))
+        lst.bind('<ButtonRelease-1>', run)
+        refresh()
+        top.update_idletasks()
+        w = top.winfo_reqwidth()
+        top.geometry(f'+{self.winfo_rootx() + (self.winfo_width() - w) // 2}+{self.winfo_rooty() + round(64 * k)}')
+        round_corners(top)
+        self._transient(top, None)
+        entry.focus_set()
+        self.animate('palette', 140, lambda t: top.attributes('-alpha', t))
+        return 'break'
+
+    def palette_items(self):
+        """(text, command) for everything the switcher can find: profiles, pages, buttons, app actions."""
+        items = [(f'Use profile: {self.shown(n)}', lambda n=n: self.use_profile(n)) for n in self.names()]
+        items += [(f'Go to {b.cget("text")}', lambda key=key: self.show_page(key)) for key, (b, _) in self.nav.items()]
+        items += [(f'Change button: {self.buttons[b][0]}', lambda b=b: (self.show_page('buttons'), self.select(b)))
+                  for b in self.editable if b in self.buttons]
+        auto = 'off' if self.cfg.get('auto') else 'on'
+        items += [('New profile', self.new), ('Check for updates', lambda: self.check_updates(manual=True)),
+                  (f'Turn auto-switch for games {auto}', self.toggle_auto_from_tray),
+                  ('Copy mouse report', self.copy_report), ('Open error log', self.open_log),
+                  ('Hide to the tray', self.hide_window), ('Quit FreeRazer', self.quit_app)]
+        return items
+
+    def use_profile(self, name):
+        """Show a profile and put it on the mouse (Ctrl+K)."""
+        if name != self.current:
+            self.load_profile(name)
+        self.refresh_list()
+        self.apply_from_tray(name)
+        self.refresh_list()
 
     # ---------- showing ----------
     def refresh_list(self):
@@ -1357,23 +1593,48 @@ class App(tk.Tk):
         self.redraw()
 
     def show_games(self):
-        """Games page: one row per game, with the profile it uses."""
+        """Games page: one group per profile, its games as chips. Click a chip to move or remove that game."""
         for w in self.games_list.winfo_children():
             w.destroy()
-        choices = list(self.cfg['profiles'])
-        if not self.cfg['links']:
-            ttk.Label(self.games_list, text='No games yet. Add one, then pick the profile it should use.',
+        links = self.cfg['links']
+        if not links:
+            ttk.Label(self.games_list, text='No games yet. Add games, then they switch to their profile.',
                       style='Muted.TLabel').pack(anchor='w')
-        for exe, prof in sorted(self.cfg['links'].items()):
-            row = ttk.Frame(self.games_list)
-            row.pack(fill='x', pady=4)
-            ttk.Label(row, text=exe, width=32).pack(side='left')
-            box = ttk.Combobox(row, state='readonly', width=22, values=choices)
-            box.set(prof)
-            box.pack(side='left', padx=(12, 16))
-            box.bind('<<ComboboxSelected>>', lambda e, exe=exe, box=box: self.relink_game(exe, box.get()))
-            ttk.Button(row, text='Remove', style='Link.TButton',
-                       command=lambda exe=exe: self.unlink_game(exe)).pack(side='left')
+        cols = 3
+        for prof in self.cfg['profiles']:
+            games = sorted(exe for exe, p in links.items() if p == prof)
+            if not games:
+                continue
+            sec = ttk.Frame(self.games_list)
+            sec.pack(fill='x', pady=(0, 20))
+            head = ttk.Frame(sec)
+            head.pack(fill='x')
+            ttk.Label(head, text=self.shown(prof), font=('Segoe UI Semibold', 11)).pack(side='left')
+            ttk.Label(head, text=f'{len(games)} game' + ('s' if len(games) > 1 else ''),
+                      style='Muted.TLabel').pack(side='left', padx=(10, 0))
+            ttk.Button(head, text='+ Add', style='Link.TButton',
+                       command=lambda prof=prof: self.link_game(prof)).pack(side='right')
+            grid = ttk.Frame(sec)
+            grid.pack(fill='x', pady=(8, 0))
+            for c in range(cols):
+                grid.columnconfigure(c, weight=1, uniform='games')
+            for i, exe in enumerate(games):
+                chip = ttk.Button(grid, text=exe if len(exe) <= 30 else exe[:29] + '…')
+                chip.configure(command=lambda exe=exe, chip=chip: self.game_menu(exe, chip))
+                chip.grid(row=i // cols, column=i % cols, sticky='ew', padx=(0, 8), pady=(0, 6))
+
+    def game_menu(self, exe, chip):
+        """A game's chip: move it to another profile, or remove it."""
+        now = self.cfg['links'].get(exe)
+        self.popup(chip, [(f'Move to {self.shown(p)}', lambda p=p: self.relink_game(exe, p), True)
+                          for p in self.cfg['profiles'] if p != now] + [None, (f'Remove {exe}', lambda: self.unlink_game(exe), True)])
+
+    def add_game_menu(self, under):
+        """+ Add games: pick the profile first (straight to the file picker when there is only one)."""
+        profs = list(self.cfg['profiles'])
+        if len(profs) <= 1:
+            return self.link_game(profs[0] if profs else None)
+        self.popup(under, [(f'For {self.shown(p)}', lambda p=p: self.link_game(p), True) for p in profs])
 
     def redraw(self):
         c = self.canvas
@@ -1534,21 +1795,38 @@ class App(tk.Tk):
         top = tk.Toplevel(self, bg=PANEL, padx=round(4 * k), pady=round(4 * k))
         top.overrideredirect(True)
         top.attributes('-topmost', True)
+        top.attributes('-alpha', 0.0)  # faded in below
+        rows = []
         for item in items:
             if item is None:
                 tk.Frame(top, height=1, bg=LINE).pack(fill='x', padx=round(8 * k), pady=round(4 * k))
                 continue
             text, cmd, on, picked = (*item, False)[:4]
             b = ttk.Button(top, text=text, style='On.Menu.TButton' if picked else 'Menu.TButton',
-                           command=lambda c=cmd: (top.close(), c()))
+                           command=lambda c=cmd: (top.close(True), c()))
             b.pack(fill='x')
             b.state(['!disabled'] if on else ['disabled'])
+            if on:
+                rows.append(b)
+                b.bind('<Enter>', lambda e, b=b: b.focus_set())  # one highlighted row, whether mouse or keys
+
+        def move(step):  # arrow keys walk the rows that can be picked
+            if rows:
+                f = top.focus_get()
+                rows[((rows.index(f) if f in rows else -1 if step > 0 else 0) + step) % len(rows)].focus_set()
+            return 'break'
+        top.bind('<Down>', lambda e: move(1))
+        top.bind('<Up>', lambda e: move(-1))
+        top.bind('<Return>', lambda e: top.focus_get() in rows and top.focus_get().invoke())
         top.update_idletasks()
         w = max(top.winfo_reqwidth(), under.winfo_width())
         x = min(under.winfo_rootx(), self.winfo_rootx() + self.winfo_width() - w)  # stay inside the window
         top.geometry(f'{w}x{top.winfo_reqheight()}+{x}+{under.winfo_rooty() + under.winfo_height() + round(4 * k)}')
         round_corners(top)
         self._transient(top, under)
+        if rows:
+            rows[0].focus_set()
+        self.animate(f'menu{id(top)}', 120, lambda t: top.attributes('-alpha', t))
 
     def _just_closed(self, opener):
         """True right after a click closed the pop-up this widget opens: that click shouldn't reopen it."""
@@ -1557,13 +1835,18 @@ class App(tk.Tk):
 
     def _transient(self, top, opener, on_close=None):
         """A pop-up card or menu closes on Esc, a click anywhere outside it, or switching to another program.
-        Sets top.close() for its own buttons to use."""
-        def close(_=None):
+        Sets top.close() for its own buttons to use; close(True) (Esc, a pick) puts focus back on the opener."""
+        def close(refocus=False):
             if not top.winfo_exists():
                 return
             top.destroy()
             self.unbind_all('<Button-1>')
             self._last_closed = (opener, time.monotonic())
+            if refocus:
+                try:
+                    (opener or self).focus_set()
+                except tk.TclError:
+                    pass
             if on_close:
                 on_close()
 
@@ -1582,7 +1865,7 @@ class App(tk.Tk):
             if not (f and inside(f)):
                 close()
         top.close = close
-        top.bind('<Escape>', close)
+        top.bind('<Escape>', lambda e: close(True))
         top.bind('<FocusOut>', lambda e: top.after(1, gone))
         self.after_idle(lambda: top.winfo_exists() and self.bind_all('<Button-1>', click))  # not the click that opened it
         top.focus_force()
@@ -1695,23 +1978,24 @@ class App(tk.Tk):
             self.redraw()
 
     # ---------- game profiles ----------
-    def link_game(self):
-        """Add a game; it starts on the profile you're viewing (or the first one), changeable in its row."""
+    def link_game(self, prof=None):
+        """Add games to a profile; several can be picked at once (Ctrl or Shift in the file picker)."""
         from tkinter import filedialog
-        if not self.cfg['profiles']:
+        if not self.cfg['profiles'] or prof not in self.cfg['profiles']:
             return self.set_status('Make a profile first (⋯ menu > New profile), then add a game for it.')
-        path = filedialog.askopenfilename(title='Pick the game', filetypes=[('Programs', '*.exe'), ('All files', '*.*')])
-        if not path:
-            return
-        exe = os.path.basename(path).lower()
-        prof = self.current if self.current in self.cfg['profiles'] else next(iter(self.cfg['profiles']))
-        self.relink_game(exe, prof)
+        paths = filedialog.askopenfilenames(title=f'Pick games for "{self.shown(prof)}" (Ctrl+click for several)',
+                                            filetypes=[('Programs', '*.exe'), ('All files', '*.*')])
+        if paths:
+            self.relink_game([os.path.basename(p).lower() for p in paths], prof)
 
-    def relink_game(self, exe, prof):
-        self.cfg['links'][exe] = prof
+    def relink_game(self, exes, prof):
+        """Put one game (a name) or several (a list) on a profile; a game already on another profile moves."""
+        exes = [exes] if isinstance(exes, str) else exes
+        for exe in exes:
+            self.cfg['links'][exe] = prof
         self.write_cfg()
         self.show_games()
-        self.set_status(f'{exe} uses "{prof}".' +
+        self.set_status((f'{exes[0]} uses' if len(exes) == 1 else f'{len(exes)} games use') + f' "{prof}".' +
                         ('' if self.auto_var.get() else ' Turn on Auto-switch to use it.'))
 
     def unlink_game(self, exe):
@@ -1969,8 +2253,18 @@ class App(tk.Tk):
             return
         battery, dpi, hz, model, power, light = info
         level = battery and battery[0]
-        self.dev_lbl.configure(text='Connected' if battery is None else
-                               f'Battery {level}%' + (' · charging' if battery[1] else ''), style='HeadMuted.TLabel')
+        if battery is None:
+            self.dev_lbl.configure(text='Connected', style='HeadMuted.TLabel')
+        else:  # a changed level rolls to the new number, like NumberFlow
+            show_bat = lambda v, tail=' · charging' if battery[1] else '': self.dev_lbl.configure(
+                text=f'Battery {v}%{tail}', style='HeadMuted.TLabel')
+            if isinstance(level, int) and isinstance(self._bat, int):
+                old_bat = self._bat
+                self.animate('battery', 600, lambda t: show_bat(round(old_bat + (level - old_bat) * t)))
+            else:  # first reading, or no level reported: nothing to roll from
+                self.stop_anim('battery')
+                show_bat(level)
+        self._bat = level
         has = lambda f: rs.has(model, f)  # what the mouse database (or testing here) says FreeRazer may change
         x = dpi and dpi[0]
         self.dpi_rng = rs.dpi_range(model)
@@ -1987,10 +2281,14 @@ class App(tk.Tk):
             typing = self.focus_get() is self.dpi_box
         except KeyError:  # focus in a widget Tk doesn't wrap, such as an open dropdown list
             typing = False
-        self._shown = {'dpi': self._shown.get('dpi'), 'hz': hz}
+        old = self._shown.get('dpi')
+        self._shown = {'dpi': old, 'hz': hz}
         if x and not typing:  # don't overwrite a number being typed; what's shown is what the box holds
-            self.dpi_var.set(str(x))
-            self.dpi_scale.set(dpi_to_slider(x, self.dpi_rng))
+            def show_dpi(t, a=old or x):  # changed on the mouse (its DPI button): number and slider roll there
+                v = round(a + (x - a) * t)
+                self.dpi_var.set(str(v))
+                self.dpi_scale.set(dpi_to_slider(v, self.dpi_rng))
+            self.animate('dpi', 450, show_dpi)
             self._shown['dpi'] = x
         self.poll_var.set(hz or 0)
         self.power['low'][0].set_range(*rs.low_power_range(model))
@@ -2025,6 +2323,7 @@ class App(tk.Tk):
         self._connected = True
 
     def dpi_changed(self):
+        self.stop_anim('dpi')  # your own change wins over a number still rolling to what the mouse said
         try:
             dpi = int(self.dpi_var.get())
         except ValueError:
@@ -2209,6 +2508,7 @@ class App(tk.Tk):
 
     def dpi_sliding(self, value):
         """While the slider moves, only the number follows; the mouse is set when it is let go."""
+        self.stop_anim('dpi')
         self.dpi_var.set(str(slider_to_dpi(float(value), self.dpi_rng)))
 
     def poll_changed(self):
@@ -2527,6 +2827,9 @@ if __name__ == '__main__':
     if already:
         k32.SetEvent(SHOW_EVENT)
         sys.exit()
+    import atexit
+    log_event(' '.join(['started', *sys.argv[1:]]))  # --tray alone = Windows startup, --tray --updated = after an update
+    atexit.register(log_event, 'stopped')
     ctypes.windll.shcore.SetProcessDpiAwareness(1)  # sharp text on scaled displays instead of blurry upscaling
     try:
         App().mainloop()

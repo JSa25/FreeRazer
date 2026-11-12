@@ -76,6 +76,7 @@ fr.App.check_updates = lambda self, manual=False: None
 fr.App.refresh_device = lambda self, repeat=True: None
 ctypes.windll.shcore.SetProcessDpiAwareness(1)
 app = fr.App()
+import test_screen; test_screen.place(app)  # FR_TEST_SCREEN: keep test windows on a chosen monitor
 app.write_cfg = lambda: True
 app.deiconify()
 
