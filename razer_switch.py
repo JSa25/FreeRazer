@@ -15,6 +15,7 @@ import shutil
 import sys
 import threading
 import time
+import types
 
 import hid
 
@@ -471,13 +472,16 @@ class Mouse:
             found = [i for i in found if i['product_id'] == self.pid]
         for info in found:
             model = model_for(info['product_id'], info['product_string'])
-            # shortcut: a mouse that answers no button read with any of these isn't opened at all, even if the
-            # database has other features for it; add a fallback read if such a mouse turns up
             for txn in (model['txn'],) if model['txn'] else TXN_GUESSES:
                 d = hid.device()
                 try:
                     d.open_path(info['path'])
-                    if transact(d, read_packet(1, txn))[0] == 0x02:
+                    status = transact(d, read_packet(1, txn))[0]
+                    # 03 = "not supported": the mouse is there and answers, it just keeps no button memory (older
+                    # mice like the DeathAdder Elite). Open it anyway when the database has settings for it and it
+                    # answers a plain firmware read; its buttons then stay locked (confirm_buttons finds none).
+                    if status == 0x02 or (status == 0x03 and model.get('features')
+                                          and transact(d, packet(0x00, 0x81, [], txn, size=0x02))[0] == 0x02):
                         self.dev, self.model, self.txn, self.poll_table = d, model, txn, None
                         return
                 except OSError:
@@ -1242,6 +1246,56 @@ def test():
         with open(shipped, encoding='utf-8') as f:
             assert len(check_db(json.load(f))) > 100
     use_db({'version': 0, 'mice': []})
+
+    # a mouse with settings in the database but no button memory (DeathAdder Elite) answers the button read
+    # with 03 (not supported) and still opens, if it answers a firmware read; others are not opened
+    class _NoButtons(_FakeDev):
+        reject = {(0x02, 0x8C): b'\x03'}  # (class, command) -> status to answer with
+
+        def open_path(self, path):
+            pass
+
+        def get_feature_report(self, _id, _n):
+            r, last = bytearray(super().get_feature_report(_id, _n)), self.sent[-1]
+            r[1:2] = self.reject.get((last[6], last[7]), r[1:2])
+            return bytes(r)
+
+    def plug(pid, name, dev_cls):
+        info = {'product_id': pid, 'product_string': name, 'usage_page': 1, 'usage': 2, 'interface_number': 0,
+                'path': b'x'}
+        return types.SimpleNamespace(enumerate=lambda vid: [info], device=dev_cls)
+    real_hid = globals()['hid']
+    try:
+        use_db({'version': 1, 'mice': [{'pid': 0x005C, 'name': 'Razer DeathAdder Elite', 'features': ['dpi']}]})
+        globals()['hid'] = plug(0x005C, 'Razer DeathAdder Elite', _NoButtons)
+        e = Mouse()
+        e.connect()
+        assert e.model['name'] == 'DeathAdder Elite' and e.dev.sent[-1][6:8] == b'\x00\x81'  # firmware read: harmless
+        assert e.confirm_buttons() == ('DeathAdder Elite', set()) and not e.writable()  # buttons stay locked
+        n = len(e.dev.sent)
+        try:
+            e.set_action(4, 'f5')
+            raise AssertionError('wrote a button the mouse has no memory for')
+        except ValueError:
+            assert len(e.dev.sent) == n, 'sent before refusing'
+        # no firmware answer either: not opened, as before
+        _NoButtons.reject = {(0x02, 0x8C): b'\x03', (0x00, 0x81): b'\x05'}
+        try:
+            Mouse().connect()
+            raise AssertionError('opened a mouse that answers nothing')
+        except OSError:
+            pass
+        # not in the database (no settings to offer): a refused button read still means not opened
+        _NoButtons.reject = {(0x02, 0x8C): b'\x03'}
+        globals()['hid'] = plug(0x0BEF, 'Razer Unknown', _NoButtons)
+        try:
+            Mouse().connect()
+            raise AssertionError('opened a mouse with no data')
+        except OSError:
+            pass
+    finally:
+        globals()['hid'] = real_hid
+        use_db({'version': 0, 'mice': []})
 
     # profiles move to %APPDATA%: copied once from the old folder, never overwritten afterwards
     import tempfile
