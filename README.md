@@ -217,6 +217,8 @@ For a Razer mouse that isn't in the [supported mice](#supported-mice) list. The 
 
 The same works for a mouse that is listed but is missing buttons, such as a Naga's side grid.
 
+**Learn buttons** (Settings > Mouse database, or Ctrl+K) adds missing buttons yourself, no issue needed. Reset the mouse to factory settings in Synapse, close Synapse, then press each button. FreeRazer reads what every button ID does, and each press shows which ID did it. Add new buttons puts them under the picture as More buttons, where they can be changed like any other. Send to GitHub opens a filled-in issue in your browser; press Submit and the buttons can be added for everyone with that mouse. Buttons that only change DPI or the profile on the mouse send nothing to Windows, so they can't be found this way.
+
 What the report contains: the USB product IDs of your Razer devices, which transaction ID the mouse answers to, and what the mouse returns for button IDs 1 to 127.
 
 From that, a new entry goes into `DEVICES`. The same report also adds buttons beyond the usual ones (a Naga's side grid, say); they show under the picture as More buttons. A hand-made entry looks like this:

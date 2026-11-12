@@ -39,6 +39,9 @@ def check_cfg(cfg):
         isinstance(b, int) and not isinstance(b, bool) for b in ids)), '"confirmed"')
     need(str_dict(cfg.get('keep', {}), lambda d: isinstance(d, dict)), '"keep"')
     need(str_dict(cfg.get('hypershift', {}), lambda v: isinstance(v, bool)), '"hypershift"')
+    need(str_dict(cfg.get('learned', {}), lambda d: str_dict(d, lambda v: isinstance(v, list) and len(v) == 2 and all(
+        isinstance(x, str) for x in v))) and all(b.isdigit() for d in cfg.get('learned', {}).values() for b in d),
+         '"learned"')
     need(isinstance(cfg.get('active', 'default'), str), '"active"')
     need(cfg.get('mouse') is None or isinstance(cfg['mouse'], int), '"mouse"')
 
@@ -100,6 +103,90 @@ VK_KEYS = {0x08: 'backspace', 0x09: 'tab', 0x0D: 'enter', 0x14: 'capslock', 0x1B
            0xBD: '-', 0xBE: '.', 0xBF: '/', 0xC0: '`', 0xDB: '[', 0xDC: '\\', 0xDD: ']', 0xDE: "'",
            **{0x30 + i: str(i) for i in range(10)}, **{0x41 + i: chr(97 + i) for i in range(26)},
            **{0x70 + i: f'f{i + 1}' for i in range(24)}}
+MOD_VKS = {0xA0: 'shift', 0xA1: 'rshift', 0xA2: 'ctrl', 0xA3: 'rctrl', 0xA4: 'alt', 0xA5: 'ralt'}
+
+
+class InputWatch:
+    """Every key and mouse button press anywhere in Windows, as a FreeRazer action name, passed to seen() on a
+    background thread. Low-level hooks that only watch: nothing is blocked or changed. stop() removes them.
+    shortcut: a press from the keyboard looks the same as one from the mouse; Raw Input could tell them apart."""
+    def __init__(self, seen):
+        import threading
+        self.seen, self.tid, self.held, self.alone = seen, None, set(), None
+        self.ready = threading.Event()
+        threading.Thread(target=self._run, daemon=True).start()
+        self.ready.wait(2)
+
+    def key(self, vk, down):
+        """A keyboard event: key down -> action (with the modifiers held), a modifier tapped alone -> itself."""
+        mod = MOD_VKS.get(vk)
+        if mod:
+            if down and mod not in self.held:
+                self.held.add(mod)
+                self.alone = mod
+            elif not down:
+                self.held.discard(mod)
+                if self.alone == mod:
+                    self.seen(mod)
+                self.alone = None
+            return
+        if down and VK_KEYS.get(vk):
+            self.alone = None
+            self.seen(rs.combo({m.lstrip('r') for m in self.held}, VK_KEYS[vk]))
+
+    def button(self, msg, data):
+        """A mouse event: button down or wheel -> action."""
+        wheel = ctypes.c_short(data >> 16).value
+        action = {0x201: 'mouse:left', 0x204: 'mouse:right', 0x207: 'mouse:middle',
+                  0x20B: 'mouse:back' if data >> 16 == 1 else 'mouse:forward',
+                  0x20A: 'mouse:scrollup' if wheel > 0 else 'mouse:scrolldown', 0x20E: 'tilt'}.get(msg)
+        if action:
+            self.seen(action)
+
+    def _run(self):
+        from ctypes import wintypes as wt
+        u, k = ctypes.windll.user32, ctypes.windll.kernel32
+        proc = ctypes.WINFUNCTYPE(ctypes.c_ssize_t, ctypes.c_int, ctypes.c_size_t, ctypes.c_ssize_t)
+        u.SetWindowsHookExW.argtypes = (ctypes.c_int, proc, wt.HINSTANCE, wt.DWORD)
+        u.SetWindowsHookExW.restype = ctypes.c_void_p
+        u.CallNextHookEx.argtypes = (ctypes.c_void_p, ctypes.c_int, ctypes.c_size_t, ctypes.c_ssize_t)
+        u.CallNextHookEx.restype = ctypes.c_ssize_t
+        u.UnhookWindowsHookEx.argtypes = (ctypes.c_void_p,)
+        k.GetModuleHandleW.restype = wt.HMODULE
+        read = lambda lp, n: (ctypes.c_uint32 * n).from_address(lp)
+
+        def on_key(code, wp, lp):  # KBDLLHOOKSTRUCT: vkCode first
+            if code == 0:
+                try:
+                    self.key(read(lp, 1)[0], wp in (0x100, 0x104))
+                except Exception:
+                    log_error('key tester')
+            return u.CallNextHookEx(None, code, wp, lp)
+
+        def on_mouse(code, wp, lp):  # MSLLHOOKSTRUCT: x, y, mouseData
+            if code == 0 and wp != 0x200:  # 0x200: the pointer moved
+                try:
+                    self.button(wp, read(lp, 3)[2])
+                except Exception:
+                    log_error('key tester')
+            return u.CallNextHookEx(None, code, wp, lp)
+        self._procs = proc(on_key), proc(on_mouse)  # kept alive while hooked
+        mod = k.GetModuleHandleW(None)
+        hooks = [u.SetWindowsHookExW(13, self._procs[0], mod, 0), u.SetWindowsHookExW(14, self._procs[1], mod, 0)]
+        self.tid = k.GetCurrentThreadId()
+        self.ready.set()
+        msg = wt.MSG()
+        while u.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:  # the hooks are called from this message loop
+            pass
+        for h in hooks:
+            if h:
+                u.UnhookWindowsHookEx(h)
+
+    def stop(self):
+        if self.tid:
+            ctypes.windll.user32.PostThreadMessageW(self.tid, 0x12, 0, 0)  # WM_QUIT
+            self.tid = None
+
 
 # button: (label side, label y, line end x relative to centre, line end y) on a 720x340 drawing
 W, H, CX = 720, 340, 360
@@ -119,11 +206,21 @@ def leader(b):
     return [(CX + s * (REACH + 45), y), (CX + s * REACH, y), (CX + s * (REACH - 35), y), (CX + tx, ty)]
 
 
-APP_VERSION = '1.0.5'  # build.ps1 reads this; bump it for every release
+APP_VERSION = '1.0.6'  # build.ps1 reads this; bump it for every release
 UPDATE_REPO = 'JSa25/freerazer'  # GitHub repo whose Releases carry the installer
 SETUP_ASSET = 'FreeRazerSetup.exe'  # release asset, plus SETUP_ASSET + '.sha256'
 DB_URL = f'https://raw.githubusercontent.com/{UPDATE_REPO}/master/{rs.DB_FILE}'  # the mouse database, kept in the repo
 ISSUES_URL = f'https://github.com/{UPDATE_REPO}/issues/new'  # where mouse reports go
+
+
+def buttons_issue_url(model, buttons):
+    """A new GitHub issue filled in from Learn buttons (.github/ISSUE_TEMPLATE/buttons.yml); the user checks it and
+    submits it in their browser, so the app needs no GitHub account or token."""
+    from urllib.parse import urlencode
+    return ISSUES_URL + '?' + urlencode({
+        'template': 'buttons.yml', 'title': f'Buttons for {model["name"]}', 'mouse': model['name'],
+        'pid': f'{model["pids"][0]:#06x}', 'version': APP_VERSION,
+        'buttons': buttons[:4000]})  # shortcut: browsers cut links near 8 KB; a mouse with 100+ buttons would lose some
 NO_WINDOW = 0x08000000  # CREATE_NO_WINDOW: helper programs run without flashing a console
 
 
@@ -539,6 +636,7 @@ class App(tk.Tk):
         # buttons that read back as their factory action, per model; see Mouse.confirm_buttons
         self.mouse.confirmed = {n: set(ids) for n, ids in self.cfg.get('confirmed', {}).items()}
         self.mouse.hs = dict(self.cfg.get('hypershift', {}))  # which mice turned out to have a HyperShift layer
+        rs.LEARNED = {n: {int(b): tuple(v) for b, v in d.items()} for n, d in self.cfg.get('learned', {}).items()}
         self.model = rs.detect(self.mouse.pid) or rs.DEVICES[0]  # V4 Pro layout until a mouse is found
         self.buttons, self.editable = self.model['buttons'], self.editable_for(self.model)
         migrate_startup()
@@ -1017,10 +1115,12 @@ class App(tk.Tk):
         self.db_lbl = ttk.Label(row, style='Muted.TLabel')
         self.db_lbl.pack(side='left', padx=(12, 0))
         self.show_db()
-        ttk.Label(pg, text='Mouse missing buttons, or not known? Copy a report and paste it into an issue on GitHub. '
-                           'It only reads from the mouse.', style='Muted.TLabel').pack(anchor='w', pady=(12, 8))
+        ttk.Label(pg, text='Mouse missing buttons? Learn them by pressing each one. Mouse not known? Copy a report and '
+                           'paste it into an issue on GitHub. Both only read from the mouse.',
+                  style='Muted.TLabel').pack(anchor='w', pady=(12, 8))
         row = ttk.Frame(pg)
         row.pack(anchor='w')
+        ttk.Button(row, text='Learn buttons…', command=self.learn_buttons).pack(side='left', padx=(0, 8))
         self.report_btn = ttk.Button(row, text='Copy mouse report', command=self.copy_report)
         self.report_btn.pack(side='left')
         ttk.Button(row, text='Open GitHub issues', style='Link.TButton',
@@ -1558,7 +1658,7 @@ class App(tk.Tk):
         auto = 'off' if self.cfg.get('auto') else 'on'
         items += [('New profile', self.new), ('Check for updates', lambda: self.check_updates(manual=True)),
                   (f'Turn auto-switch for games {auto}', self.toggle_auto_from_tray),
-                  ('Copy mouse report', self.copy_report), ('Open error log', self.open_log),
+                  ('Learn buttons', self.learn_buttons), ('Copy mouse report', self.copy_report), ('Open error log', self.open_log),
                   ('Hide to the tray', self.hide_window), ('Quit FreeRazer', self.quit_app)]
         return items
 
@@ -2138,9 +2238,9 @@ class App(tk.Tk):
         self._draw_mouse()  # clickable labels follow what can be changed
         self.load_profile(self.current)
 
-    def _use_model(self, model):
-        """A different mouse: rebuild the picture and button list for it."""
-        if model['name'] == self.model['name']:
+    def _use_model(self, model, again=False):
+        """A different mouse (or the same one with buttons learned): rebuild the picture and button list for it."""
+        if model['name'] == self.model['name'] and not again:
             return
         self.close_popover()
         self.model = model
@@ -2571,6 +2671,178 @@ class App(tk.Tk):
                             'buttons.')
         threading.Thread(target=work, daemon=True).start()
 
+    def learn_buttons(self):
+        """Key tester: FreeRazer reads what every button ID on the mouse does (reads only), then each press anywhere
+        shows the button ID doing that. New ones can be added (they show under the picture as More buttons), and
+        what was found can be copied for a GitHub issue."""
+        import threading
+        if getattr(self, '_learn', None) and self._learn.winfo_exists():
+            return self._learn.lift()
+        k = self.k
+        top = self._learn = tk.Toplevel(self, bg=BG, padx=round(PAGE_PAD * k), pady=round(PAGE_PAD * k))
+        top.title('Learn buttons')
+        top.transient(self)
+        top.geometry(f'+{self.winfo_rootx() + round(40 * k)}+{self.winfo_rooty() + round(40 * k)}')
+        ttk.Label(top, text='Learn buttons', style='H2.TLabel').pack(anchor='w')
+        ttk.Label(top, style='Muted.TLabel', justify='left', wraplength=round(470 * k), text=(
+            'Press each button on your mouse, one at a time. FreeRazer finds the button from what it does, so reset '
+            'the mouse to factory settings in Razer Synapse first. Buttons that only change DPI or the profile on '
+            'the mouse send nothing to Windows, so they can\'t be found here. Don\'t type on the keyboard meanwhile.'
+        )).pack(anchor='w', pady=(2, 12))
+        state = ttk.Label(top, text='Reading the mouse (about 10 seconds)…')
+        state.pack(anchor='w')
+        rows = ttk.Frame(top)
+        rows.pack(fill='x', pady=(8, 0))
+        bar = ttk.Frame(top)
+        bar.pack(anchor='w', pady=(16, 0))
+        top.add = ttk.Button(bar, text='Add new buttons', style='Accent.TButton', command=lambda: save())
+        top.add.pack(side='left')
+        top.add.state(['disabled'])
+        ttk.Button(bar, text='Send to GitHub', command=lambda: send()).pack(side='left', padx=(8, 0))
+        ttk.Button(bar, text='Close', command=lambda: close()).pack(side='left', padx=(8, 0))
+        top.found = {}  # button ID: [action, name StringVar for a new button (else None), row label, name]
+        top.unclear, top.missed = {}, []  # pressed: IDs when several do it; presses no ID is doing
+        top.model, top.reads, top.watch = None, None, None
+        q = queue.Queue()
+
+        def work():
+            try:
+                with self.mouse.lock:
+                    self.mouse.connect()
+                    model, reads = self.mouse.model, {}
+                    for b in range(1, 0x80):
+                        try:
+                            reads[b] = self.mouse.get_action(b)
+                        except OSError:
+                            pass
+                q.put(('read', model, reads))
+            except OSError as e:
+                q.put(('fail', e))
+            except Exception as e:  # never crash the app over the tester
+                log_error('key tester')
+                q.put(('fail', e))
+
+        def pump():
+            if not top.winfo_exists():
+                return
+            try:
+                while True:
+                    kind, *args = q.get_nowait()
+                    if kind == 'read':
+                        top.model, top.reads = args
+                        if not top.reads:
+                            state.configure(text='The mouse didn\'t answer. Move it to wake it, then open this again.')
+                        else:
+                            state.configure(text=f'{top.model["name"]}: press a button on your mouse.')
+                            top.watch = InputWatch(lambda a: q.put(('press', a)))
+                    elif kind == 'fail':
+                        state.configure(text=f'Mouse not found. Plug it in or switch it on, then open this again. '
+                                             f'({args[0]})')
+                    else:
+                        top.press(args[0])
+            except queue.Empty:
+                pass
+            top.after(30, pump)
+
+        def press(action):
+            ids = rs.match_press(top.reads, action)
+            said = rs.pretty(action)
+            if not ids:
+                if said not in top.missed:
+                    top.missed.append(said)
+                return state.configure(text=f'{said}: no button on the mouse is set to that.')
+            if len(ids) > 1:
+                top.unclear[said] = ids
+                return state.configure(text=f'{said}: {len(ids)} button IDs do that, so FreeRazer can\'t tell which '
+                                            'one you pressed. Send to GitHub and they can be sorted out there.')
+            b = ids[0]
+            if b not in top.found:
+                a = top.reads[b]
+                row = ttk.Frame(rows)
+                row.pack(fill='x', pady=2)
+                lbl = ttk.Label(row, width=8, text=f'{b:#04x}')
+                lbl.pack(side='left')
+                ttk.Label(row, width=18, text=rs.pretty(a)).pack(side='left')
+                known = b in self.model['buttons'] and self.model['name'] == top.model['name']
+                try:
+                    rs.encode(a)
+                    can = True
+                except ValueError:
+                    can = False
+                var = None
+                if known:
+                    name = self.model['buttons'][b][0]
+                    ttk.Label(row, text=f'{name} · already known', style='Muted.TLabel').pack(side='left')
+                elif can:
+                    name = None
+                    var = tk.StringVar(value=f'Button {rs.pretty(a)}')
+                    tk.Entry(row, textvariable=var, bg=SIDE, fg=FG, insertbackground=FG, relief='flat',
+                             bd=round(4 * k), font=FONT, highlightthickness=0, width=24).pack(side='left')
+                    top.add.state(['!disabled'])
+                else:
+                    name = None
+                    ttk.Label(row, text='New, but FreeRazer can\'t put this action back yet',
+                              style='Muted.TLabel').pack(side='left')
+                top.found[b] = [a, var, lbl, name]
+            lbl = top.found[b][2]
+            lbl.configure(foreground=ACCENT)
+            lbl.after(700, lambda: lbl.winfo_exists() and lbl.configure(foreground=FG))
+            state.configure(text=f'{said}: button ID {b:#04x}.')
+        top.press = press
+
+        def save():
+            new = {b: ((var.get().strip() or f'Button {b:#04x}')[:40], a)
+                   for b, (a, var, _, _) in top.found.items() if var}
+            if not new:
+                return
+            name = top.model['name']
+            rs.LEARNED.setdefault(name, {}).update(new)
+            self.cfg.setdefault('learned', {})[name] = {str(b): list(v) for b, v in rs.LEARNED[name].items()}
+            # each one was read off the mouse doing its action, the same check as Mouse.confirm_buttons
+            self.mouse.confirmed.setdefault(name, set()).update(new)
+            self.cfg.setdefault('confirmed', {})[name] = sorted(self.mouse.confirmed[name])
+            self.write_cfg()
+            grown = lambda m: {**m, 'buttons': {**m['buttons'], **rs.LEARNED[name]}}  # as rs.model_for adds them
+            with self.mouse.lock:
+                if self.mouse.model and self.mouse.model['name'] == name:
+                    self.mouse.model = grown(self.mouse.model)
+            if self.model['name'] == name:
+                self._use_model(grown(self.model), again=True)
+            for b, (label, _) in new.items():
+                top.found[b][1], top.found[b][3] = None, label
+            top.add.state(['disabled'])
+            n = len(new)
+            msg = f'Added {n} button{"s" if n > 1 else ""}. They\'re under the picture as More buttons.'
+            state.configure(text=msg)
+            self.set_status(msg)
+
+        def send():
+            if not top.model:
+                return
+            lines = []
+            for b, (a, var, _, name) in sorted(top.found.items()):
+                lines.append(f'{b:#04x}: {a} ({var.get() if var else name or "no name"})')
+            lines += [f'{said}: several IDs do it: {", ".join(f"{b:#04x}" for b in ids)}' for said, ids in top.unclear.items()]
+            if top.missed:
+                lines.append('Pressed, but no button ID does it: ' + ', '.join(top.missed))
+            if not lines:
+                return state.configure(text='Press some buttons first.')
+            text = '\n'.join(lines)
+            self.clipboard_clear()
+            self.clipboard_append(text)  # in case the browser doesn't open
+            os.startfile(buttons_issue_url(top.model, text))
+            state.configure(text='Opened in your browser. Check it, say where each button is if you like, and press '
+                                 'Submit. (Also copied.)')
+
+        def close():
+            if top.watch:
+                top.watch.stop()
+            top.destroy()
+        top.close = close
+        top.protocol('WM_DELETE_WINDOW', close)
+        threading.Thread(target=work, daemon=True).start()
+        pump()
+
     def update_db(self, manual=True):
         """Download the newest mouse database from the repo; it is checked in full before it is used or saved.
         The daily check (manual=False) only says something when the database changed."""
@@ -2615,11 +2887,14 @@ class App(tk.Tk):
         if new['name'] != old and not self.model['verified']:
             # the database names this mouse differently: what was confirmed and remembered for it moves along
             # (a button already remapped can't be confirmed again, so losing these would lock it for good)
-            for key in ('confirmed', 'keep'):
+            for key in ('confirmed', 'keep', 'learned'):
                 if old in self.cfg.get(key, {}) and new['name'] not in self.cfg[key]:
                     self.cfg[key][new['name']] = self.cfg[key].pop(old)
             if old in self.mouse.confirmed:
                 self.mouse.confirmed.setdefault(new['name'], self.mouse.confirmed.pop(old))
+            if old in rs.LEARNED:
+                rs.LEARNED.setdefault(new['name'], rs.LEARNED.pop(old))
+                new = rs.model_for(self.model['pids'][0], self.model['name'])
             self.write_cfg()
         if new['name'] == old:
             self.model = new  # same mouse, maybe more settings

@@ -1,0 +1,39 @@
+name: Mouse buttons
+description: Buttons found with Learn buttons in FreeRazer, so they can be added for everyone with this mouse.
+title: "Buttons for "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: FreeRazer fills this in from Settings > Learn buttons > Send to GitHub. Check it, then press Submit.
+  - type: input
+    id: mouse
+    attributes:
+      label: Mouse
+      description: Its name as FreeRazer shows it.
+    validations:
+      required: true
+  - type: input
+    id: pid
+    attributes:
+      label: PID
+      description: The mouse's USB product ID.
+    validations:
+      required: true
+  - type: textarea
+    id: buttons
+    attributes:
+      label: Buttons
+      description: "Button ID: what it does at factory settings (name)."
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: Where each button is
+      description: Optional. Which physical button each one is, for example "0x40 = side grid, bottom front".
+  - type: input
+    id: version
+    attributes:
+      label: FreeRazer version

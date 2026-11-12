@@ -140,9 +140,22 @@ def unknown_model(pid, name=''):
             'drawing': 'generic', 'buttons': common, 'features': set()}
 
 
+LEARNED = {}  # model name -> {button ID: (name, factory action)}, taught in the app by pressing each button
+
+
 def model_for(pid, name=''):
-    return (next((d for d in DEVICES if pid in d['pids']), None) or (db_model(DB[pid]) if pid in DB else None)
-            or unknown_model(pid, name))
+    m = (next((d for d in DEVICES if pid in d['pids']), None) or (db_model(DB[pid]) if pid in DB else None)
+         or unknown_model(pid, name))
+    learned = LEARNED.get(m['name'])
+    return {**m, 'buttons': {**m['buttons'], **learned}} if learned else m
+
+
+def match_press(actions, action):
+    """Button IDs whose action (as read off the mouse: {ID: action}) is what Windows just saw. A tilt has no
+    Windows key, so a sideways scroll ('tilt') matches any tilt action."""
+    if action == 'tilt':
+        return sorted(b for b, a in actions.items() if a.startswith('raw:0e:'))
+    return sorted(b for b, a in actions.items() if a == action)
 
 
 def has(model, feature):
@@ -1008,6 +1021,13 @@ def test():
             assert not [p for p in m.dev.sent[n:] if p[6:8] == b'\x02\x0c' and p[10]]
             assert m.get_action(5) == factory(da, 5)  # no HyperShift key without the layer
             assert 4 + HS not in m.writable()
+    # learned buttons join the model; a press matches the IDs doing that
+    LEARNED[v4['name']] = {0x50: ('Button F9', 'f9')}
+    assert model_for(v4['pids'][0])['buttons'][0x50] == ('Button F9', 'f9') and 0x50 not in v4['buttons']
+    LEARNED.clear()
+    assert match_press({4: 'mouse:back', 0x40: '1', 0x41: '1', 7: 'raw:01:02'}, '1') == [0x40, 0x41]
+    assert match_press({0x34: 'raw:0e:09008e', 4: 'mouse:back'}, 'tilt') == [0x34]
+    assert match_press({4: 'mouse:back'}, 'f9') == []
     # Naga V2 HyperSpeed: buttons as its owner read them in factory state (GitHub issue 1)
     naga = db_model({'pid': 0x00B4, 'name': 'Razer Naga V2 HyperSpeed (Receiver)', 'features': ['dpi']})
     assert len(naga['buttons']) == 21 and 4 not in naga['buttons'] and 5 not in naga['buttons']
