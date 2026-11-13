@@ -7,6 +7,7 @@ import ctypes
 import json
 import math
 import os
+import platform
 import queue
 import re
 import subprocess
@@ -53,23 +54,30 @@ def log_error(where, exc=None):
     import traceback
     text = ''.join(traceback.format_exception(*exc)) if exc else traceback.format_exc()
     try:
-        if os.path.exists(LOG) and os.path.getsize(LOG) > LOG_MAX:
-            with open(LOG, 'rb') as f:
-                f.seek(-LOG_MAX // 2, os.SEEK_END)
-                tail = f.read()
-            with open(LOG, 'wb') as f:
-                f.write(b'(older entries removed)\n' + tail[tail.find(b'\n') + 1:])
+        trim_log()
         with open(LOG, 'a', encoding='utf-8') as f:
             f.write(f'{time.strftime("%Y-%m-%d %H:%M:%S")} FreeRazer {APP_VERSION} {where}\n{text}\n')
     except OSError:
         pass
 
 
+def trim_log():
+    """Past LOG_MAX bytes, keep only the newest half of error.log."""
+    if os.path.exists(LOG) and os.path.getsize(LOG) > LOG_MAX:
+        with open(LOG, 'rb') as f:
+            f.seek(-LOG_MAX // 2, os.SEEK_END)
+            tail = f.read()
+        with open(LOG, 'wb') as f:
+            f.write(b'(older entries removed)\n' + tail[tail.find(b'\n') + 1:])
+
+
 def log_event(text):
-    """One line in error.log for starts and stops, so 'it closed' or 'it didn't start' can be traced:
-    a start with no stop before the next start means the process was killed or Windows ended it."""
+    """One line in error.log: starts and stops, so 'it closed' or 'it didn't start' can be traced (a start with
+    no stop before the next start means the process was killed or Windows ended it), and what the app found
+    out about the mouse (App.log_once)."""
     import time
     try:
+        trim_log()
         with open(LOG, 'a', encoding='utf-8') as f:
             f.write(f'{time.strftime("%Y-%m-%d %H:%M:%S")} FreeRazer {APP_VERSION} {text}\n')
     except OSError:
@@ -206,7 +214,7 @@ def leader(b):
     return [(CX + s * (REACH + 45), y), (CX + s * REACH, y), (CX + s * (REACH - 35), y), (CX + tx, ty)]
 
 
-APP_VERSION = '1.0.6'  # build.ps1 reads this; bump it for every release
+APP_VERSION = '1.0.7'  # build.ps1 reads this; bump it for every release
 UPDATE_REPO = 'JSa25/freerazer'  # GitHub repo whose Releases carry the installer
 SETUP_ASSET = 'FreeRazerSetup.exe'  # release asset, plus SETUP_ASSET + '.sha256'
 DB_URL = f'https://raw.githubusercontent.com/{UPDATE_REPO}/master/{rs.DB_FILE}'  # the mouse database, kept in the repo
@@ -609,6 +617,8 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self._anims, self._toasts, self._pal, self.last_status, self._bat = {}, [], None, '', None
+        self._logged = set()  # lines already logged this run (log_once)
+        rs.NOTE = self.log_once  # razer_switch reports what it tried when a mouse won't open or a button stays locked
         self.title('FreeRazer')
         self.configure(bg=BG)
         try:
@@ -2060,6 +2070,7 @@ class App(tk.Tk):
                 self.mouse.write(binding)
             except (OSError, ValueError) as e:
                 self.learned_hs()
+                self.log_once(f'could not put a profile on {self.model["name"]}: {e}')
                 self.set_status(f'Could not put "{self.shown(name)}" on the mouse: {e}')
                 return False
             self.learned_hs()
@@ -2139,6 +2150,9 @@ class App(tk.Tk):
         try:
             if not self.model['verified']:
                 self.confirm_buttons()
+            if (self.mouse.model or {}).get('settings_only'):
+                return self.set_status(f'{self.mouse.model["name"]} doesn\'t answer button commands, so its buttons '
+                                       'can\'t be changed. DPI, polling rate and battery still work.')
             # the HyperShift layer only once the mouse is known to have one: otherwise it may answer for the
             # normal buttons, which would never match a profile
             ids = [b for b in self.editable if not b & rs.HS or self.hs_ok(known=True)]
@@ -2180,6 +2194,10 @@ class App(tk.Tk):
             self._q.put(lambda: self._synapse_done(synapse))
             try:
                 found = rs.connected()
+                hids = sorted({(i['product_id'], i['interface_number'], i['usage_page'], i['usage'], i['product_string'])
+                               for i in rs.hid.enumerate(rs.VID)})
+                self.log_once(f'Windows {platform.version()}, Razer HID devices: ' + ('; '.join(
+                    f'PID {p:#06x} interface {n} usage {u:#06x}/{v:#06x} {name!r}' for p, n, u, v, name in hids) or 'none'))
             except OSError:
                 found = []
             self._q.put(lambda: self._mice_done(found))
@@ -2234,7 +2252,7 @@ class App(tk.Tk):
         """New set of changeable buttons: the picked button moves to one of them, the picture follows."""
         self.editable = ids
         if self.sel not in self.buttons or self.sel == 1 or (ids and self.sel not in ids):
-            self.sel = (ids or [b for b in self.buttons if b != 1])[0]
+            self.sel = (ids or [b for b in self.buttons if b != 1] or [1])[0]
         self._draw_mouse()  # clickable labels follow what can be changed
         self.load_profile(self.current)
 
@@ -2265,10 +2283,37 @@ class App(tk.Tk):
         self.dev_lbl.configure(text='Switching mouse…')
         self.refresh_device(repeat=False)
 
+    def log_once(self, line):
+        """A line in error.log, at most once per run: what happened with the mouse, so a report that says only
+        'it doesn't work' comes with its log. Called from background threads too."""
+        if line not in self._logged:
+            self._logged.add(line)
+            log_event(line)
+
     def read_info(self):
-        """Everything the Performance page shows, read off the mouse (background thread only)."""
-        m = self.mouse
-        return m.battery(), m.dpi(), m.polling(), m.model, m.power(), m.lighting()
+        """Everything the Performance page shows, read off the mouse (background thread only). A read the mouse
+        doesn't answer is left out, so only that setting shows blank, and is logged once; the mouse counts as gone
+        (OSError) only when no read answers at all."""
+        m, got, failed = self.mouse, [], []
+        for name, read in (('battery', m.battery), ('DPI', m.dpi), ('polling rate', m.polling),
+                           ('power saving', m.power), ('lighting', m.lighting)):
+            if name == 'lighting' and not (m.model or {}).get('leds'):  # nothing to ask: not an answer either
+                got.append(None)
+                continue
+            try:
+                got.append(read())
+            except OSError as e:
+                got.append(None)
+                failed.append((name, e))
+        asked = 5 if (m.model or {}).get('leds') else 4
+        mouse = m.model['name'] if m.model else 'mouse'
+        for name, e in failed if len(failed) < asked else [('every', failed[0][1])]:
+            line = f'{mouse}: {name} read got no answer: {e}'
+            self.log_once(line)
+        if len(failed) == asked:
+            raise failed[0][1]
+        battery, dpi, hz, power, light = got
+        return battery, dpi, hz, m.model, power, light
 
     def keep_settings(self, info):
         """Runs on the background thread while Synapse is open. Tested with Synapse 4: it leaves the mouse alone
@@ -2325,6 +2370,7 @@ class App(tk.Tk):
     def _synapse_done(self, names):
         was, self._synapse = self._synapse, names
         if names:
+            self.log_once(f'Razer Synapse is running ({", ".join(sorted(set(names)))}); it can hold or change the mouse')
             self.warn_lbl.configure(text='Razer Synapse is running')
             self.warn_lbl.pack(side='right', padx=(0, 20), before=self.dev_lbl)
             if not was:
@@ -2339,6 +2385,7 @@ class App(tk.Tk):
         if not self.winfo_exists():
             return
         if info is None:
+            self.stop_anim('battery')  # a level still rolling would write over this
             self.dev_lbl.configure(text='Mouse not connected', style='HeadMuted.TLabel')
             for w in (self.dpi_box, *self.poll_btns):
                 w.state(['disabled'])
@@ -2354,6 +2401,7 @@ class App(tk.Tk):
         battery, dpi, hz, model, power, light = info
         level = battery and battery[0]
         if battery is None:
+            self.stop_anim('battery')
             self.dev_lbl.configure(text='Connected', style='HeadMuted.TLabel')
         else:  # a changed level rolls to the new number, like NumberFlow
             show_bat = lambda v, tail=' · charging' if battery[1] else '': self.dev_lbl.configure(
@@ -2416,8 +2464,8 @@ class App(tk.Tk):
         if self.tray:
             self.tray.title = 'FreeRazer' if battery is None else f'FreeRazer · battery {level}%'
         # back after being unplugged, or the mouse that answered isn't the one shown (another one was opened)
-        if self._connected is False or model['name'] != self.model['name']:
-            self._use_model(model)
+        if self._connected is False or model['name'] != self.model['name'] or model['buttons'] != self.model['buttons']:
+            self._use_model(model, again=model['buttons'] != self.model['buttons'])
             self._failed = None  # let auto-switch retry a profile that failed while it was away
             self.read_mouse()
         self._connected = True

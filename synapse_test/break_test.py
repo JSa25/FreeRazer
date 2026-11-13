@@ -6,6 +6,7 @@ sys.path.insert(0, here)
 spec = importlib.util.spec_from_file_location('fr', os.path.join(here, 'freerazer.pyw'))
 fr = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(fr)
+fr.log_event = lambda text: None  # what the app logs about the mouse stays out of the real error.log
 rs = fr.rs
 tmp = tempfile.mkdtemp()
 fr.LOG = os.path.join(tmp, 'error.log')

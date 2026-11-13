@@ -71,6 +71,9 @@ BUTTON_LAYOUTS = {
     0x00B4: {**_BASIC, 0x0B: ('Top Thumb Button', 'raw:06:01'), 0x0C: ('Bottom Thumb Button', 'raw:06:02'),
              0x34: ('Tilt Left', 'raw:0e:09008e'), 0x35: ('Tilt Right', 'raw:0e:0a008e'),
              **{0x40 + i: (f'Side Button {i + 1}', key) for i, key in enumerate('1234567890-=')}},
+    # DeathAdder V2 X HyperSpeed, GitHub issue 2: the two buttons behind the wheel read as the DPI factory actions
+    0x009C: {**{b: DEVICES[0]['buttons'][b] for b in COMMON_BUTTONS}, 0x0B: ('DPI Up', 'raw:06:01'),
+             0x0C: ('DPI Down', 'raw:06:02')},
 }
 # factory actions FreeRazer has no name for, exactly as a mouse above reads them back: only these raw values may
 # be written (to put a button back to factory)
@@ -141,6 +144,12 @@ def unknown_model(pid, name=''):
 
 
 LEARNED = {}  # model name -> {button ID: (name, factory action)}, taught in the app by pressing each button
+NOTE = None  # the app sets this to write a line to its error log (once per run); used to find out why a mouse fails
+
+
+def note(line):
+    if NOTE:
+        NOTE(line)
 
 
 def model_for(pid, name=''):
@@ -437,8 +446,16 @@ class Mouse:
         self.connect()
         model = self.model
         known = self.confirmed.get(model['name'], set())
-        got = {b for b in model['buttons'] if b != 1 and (b in COMMON_BUTTONS or model.get('layout')) and b not in known
-               and self._try(lambda b=b: self.get_action(b)) == model['buttons'][b][1]} | known
+        got = set(known)
+        for b in model['buttons']:
+            if b == 1 or not (b in COMMON_BUTTONS or model.get('layout')) or b in known:
+                continue
+            a = self._try(lambda b=b: self.get_action(b))
+            if a == model['buttons'][b][1]:
+                got.add(b)
+            else:
+                note(f'{model["name"]}: button {b:#04x} reads {a or "nothing (refused)"}, not its factory '
+                     f'{model["buttons"][b][1]}, so it stays locked')
         if self.model is not model:  # reconnected to another mouse part way: nothing here can be trusted
             raise OSError('the mouse changed while its buttons were being read')
         return model['name'], got
@@ -469,21 +486,58 @@ class Mouse:
         found = mice()
         if self.pid in {i['product_id'] for i in found}:  # the picked one if it is plugged in, else whichever is
             found = [i for i in found if i['product_id'] == self.pid]
+        tried = []
         for info in found:
             model = model_for(info['product_id'], info['product_string'])
-            # shortcut: a mouse that answers no button read with any of these isn't opened at all, even if the
-            # database has other features for it; add a fallback read if such a mouse turns up
+            where = f'PID {info["product_id"]:#06x} interface {info["interface_number"]} usage ' \
+                    f'{info["usage_page"]:#06x}/{info["usage"]:#06x}'
             for txn in (model['txn'],) if model['txn'] else TXN_GUESSES:
                 d = hid.device()
                 try:
                     d.open_path(info['path'])
-                    if transact(d, read_packet(1, txn))[0] == 0x02:
+                    status = transact(d, read_packet(1, txn))[0]
+                    if status == 0x02:
                         self.dev, self.model, self.txn, self.poll_table = d, model, txn, None
+                        note(f'opened {model["name"]} ({where}, transaction ID {txn:#04x}, '
+                             f'{"built in" if model["verified"] else "mouse database" if info["product_id"] in DB else "not known"})')
                         return
-                except OSError:
-                    pass
+                    tried.append(f'{where} txn {txn:#04x}: status {status:#04x}')
+                except OSError as e:
+                    tried.append(f'{where} txn {txn:#04x}: {e}')
                 d.close()
+        if self._open_settings_only(found, tried):
+            return
+        note('no mouse opened: ' + ('; '.join(tried) if tried else 'no Razer mouse in the HID list'))
         raise OSError('no Razer mouse found (is it plugged in and Synapse closed?)')
+
+    def _open_settings_only(self, found, tried):
+        """A mouse that answers no button read (the Mamba 2012, GitHub issue 3) but answers a settings read the
+        mouse database gives it: opened for its settings, with no buttons to change."""
+        for info in found:
+            model = model_for(info['product_id'], info['product_string'])
+            txns = model.get('cmd_txn', {})
+            if has(model, 'dpi') and '0485' in txns:
+                read, key = packet(0x04, 0x85, [model.get('dpi_read_store', 1)], txns['0485'], size=0x07), '0485'
+            elif has(model, 'battery') and '0780' in txns:
+                read, key = packet(0x07, 0x80, [], txns['0780'], size=0x02), '0780'
+            else:
+                continue
+            d = hid.device()
+            try:
+                d.open_path(info['path'])
+                status = transact(d, read)[0]
+                if status == 0x02:
+                    self.dev, self.txn, self.poll_table = d, txns[key], None
+                    self.model = {**model, 'buttons': {1: DEVICES[0]['buttons'][1]}, 'settings_only': True}
+                    note(f'opened {model["name"]} for settings only: it answers no button read, but answers '
+                         f'{key[:2]}/{key[2:]} (PID {info["product_id"]:#06x} interface {info["interface_number"]})')
+                    return True
+                tried.append(f'PID {info["product_id"]:#06x} interface {info["interface_number"]} settings read '
+                             f'{key[:2]}/{key[2:]}: status {status:#04x}')
+            except OSError as e:
+                tried.append(f'PID {info["product_id"]:#06x} interface {info["interface_number"]} settings read: {e}')
+            d.close()
+        return False
 
     def call(self, pkt, txn=None):
         """Send one command. txn: a transaction ID for this packet only; otherwise the one the mouse database
