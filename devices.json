@@ -1,5 +1,5 @@
 {
- "version": 20261111,
+ "version": 20261116,
  "source": "openrazer",
  "credit": "Device facts from OpenRazer (https://github.com/openrazer/openrazer, GPL-2.0); no OpenRazer code is included. Thank you to the OpenRazer contributors.",
  "mice": [
@@ -2491,7 +2491,8 @@
    "name": "Razer DeathAdder V3 Pro (Wireless)",
    "dpi_max": 35000,
    "dpi_read_store": 0,
-   "poll": "classic",
+   "poll": "v2",
+   "poll_again_txn": 255,
    "features": [
     "battery",
     "dpi",
@@ -2507,8 +2508,8 @@
     "0405": 31,
     "0486": 31,
     "0406": 31,
-    "0085": 31,
-    "0005": 31,
+    "00c0": 31,
+    "0040": 31,
     "0783": 31,
     "0703": 31,
     "0781": 31,
@@ -2991,6 +2992,94 @@
     "0406": 31,
     "0085": 31,
     "0005": 31,
+    "0783": 31,
+    "0703": 31,
+    "0781": 31,
+    "0701": 31
+   }
+  },
+  {
+   "pid": 224,
+   "name": "Razer Orochi V2 (2026) (Receiver)",
+   "dpi_max": 18000,
+   "dpi_read_store": 0,
+   "poll": "classic",
+   "features": [
+    "battery",
+    "dpi",
+    "stages",
+    "poll",
+    "sleep",
+    "low_power"
+   ],
+   "txn": {
+    "0780": 31,
+    "0485": 31,
+    "0405": 31,
+    "0486": 31,
+    "0406": 31,
+    "0085": 31,
+    "0005": 31,
+    "0783": 255,
+    "0703": 255,
+    "0781": 255,
+    "0701": 255
+   }
+  },
+  {
+   "pid": 229,
+   "name": "Razer Viper V4 Pro (Wired)",
+   "dpi_max": 50000,
+   "dpi_read_store": 0,
+   "poll": "v2",
+   "poll_again_txn": 31,
+   "features": [
+    "battery",
+    "dpi",
+    "stages",
+    "poll",
+    "sleep",
+    "low_power"
+   ],
+   "txn": {
+    "0780": 31,
+    "0784": 31,
+    "0485": 31,
+    "0405": 31,
+    "0486": 31,
+    "0406": 31,
+    "00c0": 31,
+    "0040": 31,
+    "0783": 31,
+    "0703": 31,
+    "0781": 31,
+    "0701": 31
+   }
+  },
+  {
+   "pid": 230,
+   "name": "Razer Viper V4 Pro (Wireless)",
+   "dpi_max": 50000,
+   "dpi_read_store": 0,
+   "poll": "v2",
+   "poll_again_txn": 31,
+   "features": [
+    "battery",
+    "dpi",
+    "stages",
+    "poll",
+    "sleep",
+    "low_power"
+   ],
+   "txn": {
+    "0780": 31,
+    "0784": 31,
+    "0485": 31,
+    "0405": 31,
+    "0486": 31,
+    "0406": 31,
+    "00c0": 31,
+    "0040": 31,
     "0783": 31,
     "0703": 31,
     "0781": 31,
