@@ -1,5 +1,5 @@
 {
- "version": 20261116,
+ "version": 20261123,
  "source": "openrazer",
  "credit": "Device facts from OpenRazer (https://github.com/openrazer/openrazer, GPL-2.0); no OpenRazer code is included. Thank you to the OpenRazer contributors.",
  "mice": [
@@ -650,6 +650,23 @@
   {
    "pid": 94,
    "name": "Razer Abyssus 2000",
+   "dpi_max": 2000,
+   "dpi_read_store": 0,
+   "poll": "classic",
+   "features": [
+    "dpi",
+    "poll"
+   ],
+   "txn": {
+    "0485": 255,
+    "0405": 255,
+    "0085": 255,
+    "0005": 255
+   }
+  },
+  {
+   "pid": 95,
+   "name": "Razer DeathAdder 2000",
    "dpi_max": 2000,
    "dpi_read_store": 0,
    "poll": "classic",
